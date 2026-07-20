@@ -313,8 +313,11 @@ class CuSFMDataInference:
                 xyz_map = self.depth2xyzmap(depth, K_copy)
                 pcd = self.toOpen3dCloud(
                     xyz_map.reshape(-1, 3), img0.reshape(-1, 3))
+                # depth (and therefore the cloud) is in MILLIMETRES here, but
+                # --z_far is metres like every other script — comparing them raw
+                # kept only points nearer than 10 mm, i.e. an empty cloud
                 keep_mask = (np.asarray(pcd.points)[:, 2] > 0) & (
-                    np.asarray(pcd.points)[:, 2] <= self.args.z_far)
+                    np.asarray(pcd.points)[:, 2] <= self.args.z_far * 1000.0)
                 keep_ids = np.arange(len(np.asarray(pcd.points)))[keep_mask]
                 pcd = pcd.select_by_index(keep_ids)
                 o3d.io.write_point_cloud(
@@ -378,7 +381,7 @@ if __name__ == "__main__":
         default=32,
         help='number of flow-field updates during forward pass')
     parser.add_argument(
-        '--get_pc', type=bool, default=False, help='get point cloud output')
+        '--get_pc', type=int, default=0, help='get point cloud output (0/1)')
     parser.add_argument(
         '--z_far',
         default=10,
@@ -397,8 +400,8 @@ if __name__ == "__main__":
         '--num_gpus', type=int, default=1, help='number of GPUs to use')
     parser.add_argument(
         '--also_generate_for_right_camera',
-        type=bool,
-        default=False,
+        type=int,
+        default=0,
         help='whether to generate depth for right camera')
     args = parser.parse_args()
 

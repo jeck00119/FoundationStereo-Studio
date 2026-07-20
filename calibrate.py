@@ -39,6 +39,8 @@ def main() -> None:
     ap.add_argument("--out", default="calib.json", help="output calibration file")
     ap.add_argument("--krect", action="store_true", help="also write k_rectified.txt")
     ap.add_argument("--alpha", type=float, default=0.0, help="stereoRectify alpha (0=crop, 1=keep all)")
+    ap.add_argument("--force", action="store_true",
+                    help="write outputs even if the reprojection-RMS quality gates fail")
     args = ap.parse_args()
 
     scan = find_pairs(args.folder)
@@ -61,6 +63,12 @@ def main() -> None:
         gr = cv2.cvtColor(load_rgb(rp), cv2.COLOR_RGB2GRAY)
         if size is None:
             size = (gl.shape[1], gl.shape[0])        # (w, h)
+        elif ((gl.shape[1], gl.shape[0]) != size or (gr.shape[1], gr.shape[0]) != size):
+            # all corners are solved against ONE imageSize — a stray odd-sized
+            # pair would silently corrupt the whole calibration
+            print(f"  SKIP  {label} — {gl.shape[1]}×{gl.shape[0]} differs from "
+                  f"{size[0]}×{size[1]} (every pair must share one resolution)")
+            continue
         okl, cl = cv2.findChessboardCorners(gl, pattern, find_flags)
         okr, cr = cv2.findChessboardCorners(gr, pattern, find_flags)
         if okl and okr:
@@ -91,6 +99,22 @@ def main() -> None:
     print(f"Baseline |T| = {float(np.linalg.norm(T)):.4g} {args.unit}  "
           "(should be ~ your CNC step)")
 
+    # Quality gate — the "aim" numbers used to be print-only, so a garbage
+    # solution (bad corners, too little coverage) still wrote calib.json and
+    # quietly poisoned every later measurement. Gates are looser than the aims
+    # so a decent-but-imperfect solve still writes; --force overrides.
+    bad = []
+    if rms > 0.8:
+        bad.append(f"intrinsics RMS {rms:.3f} px (aim < ~0.5)")
+    if srms > 1.5:
+        bad.append(f"stereo RMS {srms:.3f} px (aim < ~1.0)")
+    if bad and not args.force:
+        print("\nNOT writing outputs — calibration quality failed:\n  - "
+              + "\n  - ".join(bad)
+              + "\nShoot better coverage (fill the frame, vary tilt/distance), "
+                "or re-run with --force to write anyway.")
+        sys.exit(2)
+
     out = {
         "K": K.tolist(), "D": np.ravel(D).tolist(),
         "R": R.tolist(), "T": np.ravel(T).tolist(),
@@ -108,9 +132,12 @@ def main() -> None:
         fx, fy, cx, cy = P1[0, 0], P1[1, 1], P1[0, 2], P1[1, 2]
         base = abs(float(P2[0, 3] / P1[0, 0]))
         base_m = base / 1000.0 if args.unit == "mm" else base   # K.txt is in metres
-        with open("k_rectified.txt", "w", encoding="utf-8") as f:
+        # next to --out, not the CWD — running from another directory used to
+        # scatter this file wherever the shell happened to be
+        krect = os.path.join(os.path.dirname(os.path.abspath(args.out)), "k_rectified.txt")
+        with open(krect, "w", encoding="utf-8") as f:
             f.write(f"{fx} 0 {cx} 0 {fy} {cy} 0 0 1\n{base_m}\n")
-        print(f"Wrote k_rectified.txt (rectified K + baseline {base_m:.6g} m). "
+        print(f"Wrote {krect} (rectified K + baseline {base_m:.6g} m). "
               "You must also rectify the images offline to use it.")
 
 
