@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QHBoxLayout,
                                QWidget)
 
 from .compare import ComparePanel
-from .engine import UNIT_DECIMALS
+from .dtypes import UNIT_DECIMALS
 from .repeat import RepeatabilityView
 from .web_cloud import WebCloudView
 from .widgets import ModelBar
@@ -36,7 +36,6 @@ class ImageView2D(QWidget):
 
     hovered = Signal(int, int)      # image x, y
     pixelClicked = Signal(int, int)  # image x, y — a left-click inside the image
-    leftView = Signal()
 
     def __init__(self, scalar: bool = True, unit: str = "", pair: bool = False,
                  dec: int = 2, parent=None) -> None:
@@ -338,7 +337,6 @@ class ImageView2D(QWidget):
             self.readout.hide()
             self.vline.hide()
             self.hline.hide()
-            self.leftView.emit()
             return
         px = self._pixel_at(pos)
         if px is None:

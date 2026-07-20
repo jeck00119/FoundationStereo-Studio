@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import functools
 import http.server
+import json
 import math
 import os
 import shutil
@@ -386,7 +387,6 @@ class WebCloudView(QWidget):
     def set_boxes(self, views, selected: int, editable: bool) -> None:
         """Draw the whole set of boxes. `views` is a list of MeasureBox (current
         unit); `selected` is the one the gizmo edits (-1 for none)."""
-        import json
         arr = [{"c": [_fin(b.cx), _fin(b.cy), _fin(b.cz)],
                 "s": [_fin(b.sx), _fin(b.sy), _fin(b.sz)],
                 "q": [_fin(b.qx), _fin(b.qy), _fin(b.qz), _fin(b.qw)]} for b in views]
@@ -399,7 +399,6 @@ class WebCloudView(QWidget):
 
     def set_measurement(self, text: str) -> None:
         # JSON-encode so newlines/quotes in the readout survive the trip to JS
-        import json
         self._js(f"api.setReadout({json.dumps(text or '')})")
 
     def set_box_scalars(self, lo: float, hi: float) -> None:
@@ -416,22 +415,20 @@ class WebCloudView(QWidget):
     def set_analyze_tool(self, mode) -> None:
         """Enter/leave a picking tool ('profile'|'distance'|'region'|'point'|None).
         Off also clears the overlay."""
-        import json
         self._js(f"api.setAnalyzeMode({json.dumps(mode) if mode else 'null'})")
 
-    def set_analyze_geom(self, markers=None, line=None, marker_r: float = 1.0) -> None:
+    def set_analyze_geom(self, markers=None, line=None) -> None:
         """Draw the overlay: sphere markers at `markers` + a polyline through `line`
-        (both lists of (x,y,z) in the current unit)."""
-        import json
+        (both lists of (x,y,z) in the current unit). Marker size is constant
+        screen-px, handled entirely by the page (scaleToPx)."""
         m = [[_fin(p[0]), _fin(p[1]), _fin(p[2])] for p in (markers or [])]
         ln = [[_fin(p[0]), _fin(p[1]), _fin(p[2])] for p in (line or [])]
-        self._js(f"api.setAnalyzeGeom({json.dumps(m)}, {json.dumps(ln)}, {_js_num(marker_r)})")
+        self._js(f"api.setAnalyzeGeom({json.dumps(m)}, {json.dumps(ln)})")
 
     def set_analyze_highlight(self, points=None) -> None:
         """Light up the exact points the current tool measured (the region / isolated
         level), so the user can confirm the right zone. `points` is an (N,3) array in
         the display unit; call after set_analyze_geom (which clears the overlay first)."""
-        import json
         p = np.asarray(points, np.float64) if points is not None else np.empty((0, 3))
         if p.ndim != 2 or p.shape[0] == 0:
             return

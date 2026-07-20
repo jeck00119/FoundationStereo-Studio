@@ -6,13 +6,27 @@ from __future__ import annotations
 import os
 
 from PySide6.QtCore import (Property, QEasingCurve, QEvent, QObject, QPoint,
-                            QPointF, QPropertyAnimation, QRect, QRectF, QSize, Qt,
+                            QPropertyAnimation, QRect, QRectF, QSize, Qt,
                             Signal)
-from PySide6.QtGui import QColor, QPainter, QPalette, QPixmap
+from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QFrame,
                                QGridLayout, QHBoxLayout, QLabel, QLayout,
                                QPushButton, QScrollArea, QSlider, QToolButton,
                                QVBoxLayout, QWidget)
+
+from .pairs import IMG_EXTS
+
+
+def _make_pill(tag: str, kind: str) -> QLabel:
+    """The LIVE / NEEDS-RUN chip both section-header widgets share."""
+    pill = QLabel(tag.upper())
+    pill.setObjectName("Pill")
+    pill.setProperty("pill", kind or "live")
+    pill.setToolTip(
+        "LIVE — these settings update the current result instantly, no re-run needed."
+        if (kind or "live") == "live"
+        else "NEEDS RUN — changing these takes effect only after you press Run.")
+    return pill
 
 
 def _lerp(a: QColor, b: QColor, t: float) -> QColor:
@@ -184,19 +198,32 @@ class ToggleSwitch(QCheckBox):
 
     def __init__(self, checked: bool = False, parent=None) -> None:
         super().__init__(parent)
+        # state BEFORE setChecked: the setChecked override reads _offset/_anim
+        self._offset = 1.0 if checked else 0.0
+        self._anim = QPropertyAnimation(self, b"offset", self)
+        self._anim.setDuration(150)
+        self._anim.setEasingCurve(QEasingCurve.InOutCubic)
         self.setChecked(checked)
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedSize(42, 24)
-        self._offset = 1.0 if checked else 0.0
-        self._anim = None
         self.toggled.connect(self._animate)
 
+    def setChecked(self, on: bool) -> None:  # noqa: N802 — Qt naming
+        """Keep the painted knob in sync even for a signals-BLOCKED programmatic
+        setChecked: toggled never fires then, so _offset froze showing the wrong
+        state (knob left / track uncolored while isChecked() said True)."""
+        super().setChecked(on)
+        target = 1.0 if self.isChecked() else 0.0
+        if self._anim.state() != QPropertyAnimation.Running and self._offset != target:
+            self.setOffset(target)
+
     def _animate(self, on: bool) -> None:
-        self._anim = QPropertyAnimation(self, b"offset", self)
-        self._anim.setDuration(150)
+        # ONE reused animation, stopped before restart — a new object per toggle
+        # left the previous one alive fighting over `offset` for up to 150 ms
+        # (and accumulating on the widget for its lifetime)
+        self._anim.stop()
         self._anim.setStartValue(self._offset)
         self._anim.setEndValue(1.0 if on else 0.0)
-        self._anim.setEasingCurve(QEasingCurve.InOutCubic)
         self._anim.start()
 
     def getOffset(self) -> float:
@@ -315,7 +342,8 @@ class StatSlider(QWidget):
         self.setValue(value)   # setValue already blocks signals + refreshes the label
 
 
-IMG_EXT = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".ppm", ".webp")
+# single source of truth in studio.pairs — a tuple because str.endswith needs one
+IMG_EXT = tuple(sorted(IMG_EXTS))
 
 
 class ImageDrop(QFrame):
@@ -402,15 +430,7 @@ class SectionLabel(QWidget):
         lay.addWidget(title)
         lay.addStretch(1)
         if tag:
-            pill = QLabel(tag.upper())
-            pill.setObjectName("Pill")
-            pill.setProperty("pill", kind or "live")
-            pill.setToolTip(
-                "LIVE — these settings update the current result instantly, no re-run needed."
-                if (kind or "live") == "live"
-                else "NEEDS RUN — changing these takes effect only after you press Run."
-            )
-            lay.addWidget(pill)
+            lay.addWidget(_make_pill(tag, kind))
 
 
 class Collapsible(QWidget):
@@ -501,14 +521,7 @@ class CollapsibleSection(QWidget):
         hl.addWidget(title_lbl)
         hl.addStretch(1)
         if tag:
-            pill = QLabel(tag.upper())
-            pill.setObjectName("Pill")
-            pill.setProperty("pill", kind or "live")
-            pill.setToolTip(
-                "LIVE — these settings update the current result instantly, no re-run needed."
-                if (kind or "live") == "live"
-                else "NEEDS RUN — changing these takes effect only after you press Run.")
-            hl.addWidget(pill)
+            hl.addWidget(_make_pill(tag, kind))
 
         self.body = QWidget()
         self._body_lay = QVBoxLayout(self.body)

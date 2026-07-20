@@ -88,21 +88,3 @@ class StereoEngine:
     @staticmethod
     def save_cloud(path: str, cloud_result: CloudResult) -> None:
         cloud.save_cloud(path, cloud_result)
-
-    @staticmethod
-    def colorize_disparity(disp: np.ndarray, cmap_name: str = "TURBO",
-                           vmin=None, vmax=None) -> np.ndarray:
-        """RGB uint8 visualization using the repo's own colormap logic."""
-        import cv2
-        from Utils import vis_disparity
-
-        cmaps = {
-            "TURBO": cv2.COLORMAP_TURBO,
-            "VIRIDIS": cv2.COLORMAP_VIRIDIS,
-            "MAGMA": cv2.COLORMAP_MAGMA,
-            "INFERNO": cv2.COLORMAP_INFERNO,
-            "JET": cv2.COLORMAP_JET,
-            "PLASMA": cv2.COLORMAP_PLASMA,
-        }
-        code = cmaps.get(cmap_name.upper(), cv2.COLORMAP_TURBO)
-        return vis_disparity(disp, min_val=vmin, max_val=vmax, color_map=code)

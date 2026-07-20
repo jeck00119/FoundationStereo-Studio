@@ -207,7 +207,7 @@ def _qss(p: dict) -> str:
 
     QToolTip {{ background: {p['surface3']}; color: {p['text']};
         border: 1px solid {p['border']}; border-radius: 6px; padding: 5px 8px; }}
-    QProgressBar {{ border: none; background: {p['surface3']}; border-radius: 3px; height: 4px; text-align: center; }}
+    QProgressBar {{ border: none; background: {p['surface3']}; border-radius: 3px; max-height: 6px; text-align: center; }}
     QProgressBar::chunk {{ background: {p['accent']}; border-radius: 3px; }}
     """
 

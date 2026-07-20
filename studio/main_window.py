@@ -17,8 +17,9 @@ from PySide6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QLabel,
 from .backends import DEFAULT_BACKEND, get_spec
 from .batch import BatchDialog, load_cloud, load_rgb
 from .compare import PLANE_TIP
-from .engine import (ANGLE_DECIMALS, REPO_ROOT, UNIT_DECIMALS, UNIT_PER_M,
-                     CloudResult, StereoParams)
+from .dtypes import (ANGLE_DECIMALS, UNIT_DECIMALS, UNIT_PER_M, CloudResult,
+                     StereoParams)
+from .engine import REPO_ROOT
 from .analyze import (board_plane, deviation, pin_analysis, point_distance,
                       region_flatness, surface_profile)
 from .measure import (MeasureBox, fit_plane, measure_box, points_in_box,
@@ -288,9 +289,9 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._scroll(self.param_panel))
         self.setCentralWidget(central)
 
-        # Loading scrim shown until the model is resident. Text is a placeholder —
-        # __init__ replaces it with the ACTUAL model + weight size as soon as the
-        # restored selection is known (it is not always FoundationStereo).
+        # Loading scrim. Hidden at startup (nothing loads until Run) — every SHOW
+        # goes through _show_load_overlay, which sets the real model name + weight
+        # size first, so this placeholder text is never actually displayed.
         self.overlay = QLabel("◆  Loading model…", central)
         self.overlay.setObjectName("Overlay")
         self.overlay.setAlignment(Qt.AlignCenter)
@@ -947,11 +948,6 @@ class MainWindow(QMainWindow):
             return np.array([0.0, 0.0, -1.0]), c
         return board_plane(self.cloud.points)
 
-    def _analyze_marker_r(self) -> float:
-        if not self._has_points(self.cloud):
-            return 1.0
-        return max(float(np.ptp(np.asarray(self.cloud.points), axis=0).max()) * 0.006, 1e-6)
-
     def _on_analyze_tool(self, tool: str) -> None:
         self._analyze_tool = tool or ""
         self._picked = []
@@ -997,7 +993,7 @@ class MainWindow(QMainWindow):
         p = np.array([x, y, z], np.float64)
         self._picked = [p] if len(self._picked) >= need else self._picked + [p]
         self.viewer.cloud_view.set_analyze_geom(
-            markers=[list(q) for q in self._picked], line=None, marker_r=self._analyze_marker_r())
+            markers=[list(q) for q in self._picked], line=None)
         if len(self._picked) >= need:
             self._compute_analyze()
 
@@ -1010,7 +1006,7 @@ class MainWindow(QMainWindow):
         u, dec = self._units, UNIT_DECIMALS.get(self._units, 2)
         off = self._z_off()                       # flat-reference correction (0 if none)
         zed = "  (zeroed)" if off else ""
-        cv, mr, tool = self.viewer.cloud_view, self._analyze_marker_r(), self._analyze_tool
+        cv, tool = self.viewer.cloud_view, self._analyze_tool
         self._analyze_last = tool                 # remember what's shown (to re-run on offset/rebuild)
         try:
             if tool == "point":
@@ -1024,7 +1020,7 @@ class MainWindow(QMainWindow):
             elif tool == "distance":
                 A, B = self._picked
                 d = point_distance(A, B)
-                cv.set_analyze_geom(markers=[list(A), list(B)], line=[list(A), list(B)], marker_r=mr)
+                cv.set_analyze_geom(markers=[list(A), list(B)], line=[list(A), list(B)])
                 self.param_panel.set_analyze_result(
                     "Distance", f"{d['dist']:.{dec}f}", u,
                     rows=[("Δx", f"{d['dx']:+.{dec}f} {u}"),
@@ -1037,7 +1033,7 @@ class MainWindow(QMainWindow):
                     self.param_panel.set_analyze_out("No surface between those points — pick two on the part.")
                     return
                 cv.set_analyze_geom(markers=[list(A), list(B)],
-                                    line=[list(q) for q in r["poly"]], marker_r=mr)
+                                    line=[list(q) for q in r["poly"]])
                 self._highlight_used(r.get("used"))
                 self.param_panel.set_profile(r["t"], r["h"])
                 self.param_panel.set_analyze_result(
@@ -1052,7 +1048,7 @@ class MainWindow(QMainWindow):
                 if r is None:
                     self.param_panel.set_analyze_out("Empty region — pick two corners over the board.")
                     return
-                cv.set_analyze_geom(markers=[list(A), list(B)], line=r["corners"], marker_r=mr)
+                cv.set_analyze_geom(markers=[list(A), list(B)], line=r["corners"])
                 self._highlight_used(r.get("used"))
                 self._last_region = r          # the raw result — what a flat-reference zeroes from
                 self.param_panel.set_analyze_result(
@@ -1478,8 +1474,8 @@ class MainWindow(QMainWindow):
         if not (os.path.isfile(left) and os.path.isfile(right)):
             self._set_status("Demo images not found in assets/.")
             return
-        self.input_panel._load(left, "left")
-        self.input_panel._load(right, "right")
+        self.input_panel.load_image(left, "left")
+        self.input_panel.load_image(right, "right")
         self._set_status("NVIDIA demo pair loaded — running…")
         QTimer.singleShot(150, self._run)
 
@@ -2191,9 +2187,10 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Batch", summary)
 
     def _on_batch_dialog_closed(self) -> None:
-        # The monitor was closed. A running batch keeps going (the window drives it,
-        # not the dialog) — just stop poking a dead widget; _finish_batch will pop a
-        # summary box instead when there's something worth reporting.
+        # The monitor was closed. If a batch is running, BatchDialog.closeEvent has
+        # already requested a cancel (deliberate — otherwise Esc/the window-X would
+        # strand a locked UI with no cancel affordance); here we just stop poking a
+        # dead widget. _finish_batch pops a summary box when there's something to say.
         self._batch_dialog = None
 
     # -------------------------------------------------------------- export

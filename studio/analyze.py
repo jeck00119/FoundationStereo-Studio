@@ -134,7 +134,7 @@ def surface_profile(points, A, B, n, c, corridor=None, nbins=60, isolate=False):
     return {
         "t": pt, "h": pht, "poly": poly.astype(np.float32),
         "angle": angle, "d_height": float(pht[-1] - pht[0]),
-        "dist": float(np.linalg.norm(B - A)), "length": L,
+        "dist": float(np.linalg.norm(B - A)),
         "n_pts": int(pc.shape[0]),
         "used": pc.astype(np.float32),                 # corridor points measured (to highlight)
     }
@@ -194,7 +194,6 @@ def region_flatness(points, A, B, n, c, isolate=False):
             # plane, so its mean over the whole patch is nonzero and std would
             # under-report whenever outliers are one-sided
             "rms": float(np.sqrt(np.mean(resid ** 2))),
-            "pp": float(np.quantile(resid, 0.98) - np.quantile(resid, 0.02)),
             "z_mean": float(np.mean(dev)),                  # mean height above the board
             "z_range": float(dev.max() - dev.min()),        # max−min height in the patch
             "local_tilt": tilt, "corners": corners,
@@ -213,9 +212,9 @@ def deviation(points, n, c):
 
 
 def pin_analysis(points_in_box, n, c):
-    """A pin's height above its local board, tip position, and verticality (axis
-    angle vs the board normal). `points_in_box` are the cloud points inside a measure
-    box on the pin. None if too sparse."""
+    """A pin's height above its local board and verticality (axis angle vs the
+    board normal). `points_in_box` are the cloud points inside a measure box on
+    the pin. None if too sparse."""
     p = np.asarray(points_in_box, np.float64)
     if len(p) < 30:
         return None
@@ -246,6 +245,4 @@ def pin_analysis(points_in_box, n, c):
         if axis is not None:
             axis = axis / np.linalg.norm(axis)
             vert = float(np.degrees(np.arccos(np.clip(abs(axis @ n), 0, 1))))
-    tip_pt = p[np.argmax(h)]
-    return {"height": height, "tip": tip, "verticality": vert,
-            "tip_pt": tip_pt.astype(np.float32), "n_pts": len(p)}
+    return {"height": height, "verticality": vert, "n_pts": len(p)}

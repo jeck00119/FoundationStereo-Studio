@@ -16,8 +16,7 @@ from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QHeaderView, QLabel,
                                QMessageBox, QPushButton, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
-from .dtypes import UNIT_DECIMALS
-from .engine import UNIT_PER_M
+from .dtypes import UNIT_DECIMALS, UNIT_PER_M
 
 
 def _num(text: str) -> QTableWidgetItem:

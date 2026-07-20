@@ -42,7 +42,10 @@ class ParamSpec:
     suffix: str = ""
     options: list = field(default_factory=list)   # for "choice": [(value, label), ...]
     tooltip: str = ""
-    needs_run: bool = True         # inference params need a re-run; False = live
+    # NOTE: every model param is a 'needs run' param — the panel wires them all
+    # to the stale cue unconditionally. A declared-but-never-honored needs_run
+    # flag used to live here; add it back only WITH the wiring if a live model
+    # param ever exists.
 
 
 @dataclass

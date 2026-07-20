@@ -9,8 +9,8 @@ lie along a pin on a board that isn't perfectly square to the camera. Every spat
 number is measured in the box's OWN frame — in particular the pin "height" is the
 extent along the box's local Z axis, which is the true tip-to-base distance once
 you have aligned the box to the pin, not a world-Z projection that would fold in the
-board's tilt. When the box is left un-rotated this collapses exactly to the old
-axis-aligned behaviour (proven by the tests), so nothing regresses.
+board's tilt. When the box is left un-rotated this collapses exactly to the plain
+axis-aligned behaviour, so nothing regresses.
 """
 from __future__ import annotations
 
@@ -131,40 +131,15 @@ class MeasureBox:
                           self.qx, self.qy, self.qz, self.qw)
 
 
-# The 12 edges as index pairs into corners() — the wireframe the 3D view draws.
-_EDGES = np.array([
-    0, 1, 1, 2, 2, 3, 3, 0,     # near face
-    4, 5, 5, 6, 6, 7, 7, 4,     # far face
-    0, 4, 1, 5, 2, 6, 3, 7,     # the struts between them
-], np.intp)
-
-
-def _corner_array(lo, hi) -> np.ndarray:
-    lo = np.asarray(lo, np.float32)
-    hi = np.asarray(hi, np.float32)
-    return np.array([
-        [lo[0], lo[1], lo[2]], [hi[0], lo[1], lo[2]],
-        [hi[0], hi[1], lo[2]], [lo[0], hi[1], lo[2]],
-        [lo[0], lo[1], hi[2]], [hi[0], lo[1], hi[2]],
-        [hi[0], hi[1], hi[2]], [lo[0], hi[1], hi[2]],
-    ], np.float32)
-
-
-def edges_from_bounds(lo, hi) -> np.ndarray:
-    """(24,3) float32 wireframe from any axis-aligned lo/hi bounds."""
-    return _corner_array(lo, hi)[_EDGES]
-
-
-def box_wireframe(box: MeasureBox) -> np.ndarray:
-    """(24,3) float32 — the box's 12 edges as line segments, world frame, rotated."""
-    return box.corners()[_EDGES]
+# (the wireframe the 3D view draws is built by the web page itself — the old
+# _EDGES/edges_from_bounds/box_wireframe helpers had no callers left and are gone)
 
 
 def points_in_box(points, box: MeasureBox) -> np.ndarray:
     """Bool mask over `points` of what lies inside `box` (bounds inclusive).
 
-    Axis-aligned boxes take the plain min/max path — the common case, and the one
-    the tests pin. A rotated box needs the exact local-frame test, but running that
+    Axis-aligned boxes take the plain min/max path — the common case. A rotated
+    box needs the exact local-frame test, but running that
     matmul over the whole cloud every drag would be wasteful, so it is gated behind
     a cheap world-AABB prefilter: only points inside the oriented box's bounding
     box get projected onto the box axes.

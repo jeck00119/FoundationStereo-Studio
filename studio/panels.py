@@ -1,7 +1,6 @@
 """Left (input + calibration) and right (parameters) panels."""
 from __future__ import annotations
 
-import html
 import math
 import os
 
@@ -13,7 +12,7 @@ from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFileDialog, QFrame,
                                QWidget)
 
 from .backends import BACKENDS, get_spec
-from .engine import UNIT_PER_M, StereoParams
+from .dtypes import UNIT_PER_M, StereoParams
 from .measure import MeasureBox
 from .pairs import IMG_FILTER, load_rgb
 from .rectify import Rectifier, StereoCalibration
@@ -113,10 +112,9 @@ def _toggle_row(name: str, checked: bool, tip: str = "") -> tuple[QWidget, Toggl
 
 
 # --------------------------------------------------- per-model param widgets
-# A backend declares its knobs as ParamSpecs; these three functions are the only
-# code that turns those into widgets and back. Shared by the right-hand parameter
-# panel and the Compare tab's per-model cards, so adding a ParamSpec to a backend
-# makes it appear — identically — in both places.
+# A backend declares its knobs as ParamSpecs; these functions are the only code
+# that turns those into widgets and back, so adding a ParamSpec to a backend is
+# all it takes to appear in the parameter panel.
 
 def build_param_widgets(specs: list, lay: QVBoxLayout, on_change=None,
                         values: dict | None = None) -> dict:
@@ -178,39 +176,6 @@ def build_param_widgets(specs: list, lay: QVBoxLayout, on_change=None,
             lay.addWidget(w)
         out[ps.key] = (ps.kind if ps.kind in ("toggle", "choice") else "slider", w)
     return out
-
-
-def summarize_params(spec, values: dict) -> tuple[str, bool]:
-    """(rich-text one-liner, anything_edited) — what a model will run with.
-
-    Values that differ from the model's own documented default are highlighted,
-    so a Compare column can say what it will use AND whether you changed it,
-    without you having to open the model.
-    """
-    if spec is None or not spec.params:
-        return ("no settings of its own", False)
-    parts, edited = [], False
-    for ps in spec.params:
-        v = values.get(ps.key, ps.default)
-        if ps.kind == "toggle":
-            shown = "on" if v else "off"
-        elif ps.kind == "choice":
-            shown = next((lbl for val, lbl in ps.options if val == v), str(v))
-        else:
-            try:
-                shown = ps.fmt.format(float(v)) + ps.suffix
-            except (TypeError, ValueError):
-                shown = str(v)
-        try:
-            differs = float(v) != float(ps.default)
-        except (TypeError, ValueError):
-            differs = v != ps.default
-        edited = edited or differs
-        shown = html.escape(str(shown))
-        if differs:
-            shown = f"<b>{shown}</b>"
-        parts.append(f"{html.escape(ps.label)} {shown}")
-    return (" · ".join(parts), edited)
 
 
 def read_param_widgets(widgets: dict) -> dict:
@@ -390,21 +355,21 @@ class InputPanel(QWidget):
         _rb.addWidget(self.calib_status)
         self.sec_calib.add(self._rect_box)
         self._rect_box.setVisible(False)
-        self.fx = self._spin(0, 1e6, 5, tip="Horizontal focal length in pixels, from your "
+        self.fx = make_spin(0, 1e6, 5, tip="Horizontal focal length in pixels, from your "
                 "camera calibration. Needed to turn disparity into real-world depth.")
-        self.fy = self._spin(0, 1e6, 5, tip="Vertical focal length in pixels — usually equal to fx.")
-        self.cx = self._spin(0, 1e6, 5, tip="Optical-center X in pixels — normally near image width ÷ 2.")
-        self.cy = self._spin(0, 1e6, 5, tip="Optical-center Y in pixels — normally near image height ÷ 2.")
+        self.fy = make_spin(0, 1e6, 5, tip="Vertical focal length in pixels — usually equal to fx.")
+        self.cx = make_spin(0, 1e6, 5, tip="Optical-center X in pixels — normally near image width ÷ 2.")
+        self.cy = make_spin(0, 1e6, 5, tip="Optical-center Y in pixels — normally near image height ÷ 2.")
         _blo, _bhi, _bdec, _bsuf = _BASELINE_CFG[self._units]
-        self.baseline = self._spin(_blo, _bhi, _bdec, suffix=_bsuf, tip="Distance between the two "
+        self.baseline = make_spin(_blo, _bhi, _bdec, suffix=_bsuf, tip="Distance between the two "
                 "camera positions. With focal length this converts disparity into metric depth. "
                 "Required for the Depth map and 3D cloud. A K.txt baseline is in metres and is "
                 "converted to the current unit automatically.")
         grid = QVBoxLayout()
         grid.setSpacing(6)
         for a, b in (("fx", self.fx), ("fy", self.fy), ("cx", self.cx), ("cy", self.cy)):
-            grid.addLayout(self._field_row(a, b))
-        grid.addLayout(self._field_row("baseline", self.baseline))
+            grid.addLayout(field_row(a, b))
+        grid.addLayout(field_row("baseline", self.baseline))
         self.sec_calib.add_layout(grid)
         self.load_k = QPushButton("Load K.txt…")
         self.load_k.setToolTip("Load fx/fy/cx/cy and baseline from a K.txt file. A K.txt sitting "
@@ -452,11 +417,11 @@ class InputPanel(QWidget):
         lay.addStretch(1)
 
     # ---------------------------------------------------------- helpers
-    def _spin(self, lo, hi, dec, suffix="", tip="") -> QDoubleSpinBox:
-        return make_spin(lo, hi, dec, suffix, tip)
-
-    def _field_row(self, name, widget) -> QHBoxLayout:
-        return field_row(name, widget)
+    def load_image(self, path: str, which: str) -> None:
+        """Public programmatic load ('left' / 'right') — the same path a drop or
+        file-pick takes. Exists so callers (the demo autoload) don't reach into
+        the private _load."""
+        self._load(path, which)
 
     def _pick(self, which: str) -> None:
         path, _ = QFileDialog.getOpenFileName(self, f"Choose {which} image", "", IMG_FILTER)
@@ -780,11 +745,6 @@ class InputPanel(QWidget):
             cx=self.cx.value(), cy=self.cy.value(),
             baseline=self.baseline.value(),
         )
-
-    def set_calibration(self, d: dict) -> None:
-        self.fx.setValue(d.get("fx", 0)); self.fy.setValue(d.get("fy", 0))
-        self.cx.setValue(d.get("cx", 0)); self.cy.setValue(d.get("cy", 0))
-        self.baseline.setValue(d.get("baseline", 0))
 
     def set_units(self, unit: str) -> None:
         """Switch the baseline field between mm and m, rescaling its value so the
