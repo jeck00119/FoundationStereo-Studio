@@ -8,28 +8,30 @@ import os
 import numpy as np
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QImage, QPixmap
-from PySide6.QtWidgets import (QAbstractSpinBox, QComboBox, QDoubleSpinBox,
-                               QFileDialog, QFrame, QHBoxLayout, QLabel,
-                               QPushButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFileDialog, QFrame,
+                               QHBoxLayout, QLabel, QPushButton, QVBoxLayout,
+                               QWidget)
 
 from .backends import BACKENDS, get_spec
 from .engine import UNIT_PER_M, StereoParams
 from .measure import MeasureBox
+from .pairs import IMG_FILTER, load_rgb
 from .rectify import Rectifier, StereoCalibration
 from .widgets import (Collapsible, CollapsibleSection, ImageDrop, MetricCard,
                       StatSlider, ToggleSwitch, no_wheel, set_tip)
-
-IMG_FILTER = "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.ppm *.webp)"
 
 # per-unit widget config (mm is the default — best for close/PCB work)
 # baseline spin:  (min, max, decimals, suffix). The baseline LINEARLY scales every
 # depth (z = fx·baseline/disp) and setDecimals ROUNDS the stored value, so it carries
 # extra digits — a derived stereo-calibration baseline is full-precision and must not
 # be quantised on the way in.
+# All three rows span the SAME physical range (0–10 m), like the z/box tables
+# below — the mm/µm rows used to cap at 2 m while m allowed 100 m, so cycling
+# units silently CLAMPED any baseline over 2 m (a depth-scaling corruption).
 _BASELINE_CFG = {
-    "mm": (0.0, 2000.0, 6, " mm"),
-    "m":  (0.0, 100.0, 9, " m"),
-    "µm": (0.0, 2_000_000.0, 3, " µm"),      # 1 nm precision, like mm's 6-dec
+    "mm": (0.0, 10_000.0, 6, " mm"),
+    "m":  (0.0, 10.0, 9, " m"),
+    "µm": (0.0, 10_000_000.0, 3, " µm"),     # 1 nm precision, like mm's 6-dec
 }
 # z-near / z-far sliders:  (min, max, default, step, fmt, suffix). Every row is the mm
 # row scaled by the exact unit factor (range, default AND step): µm = mm×1000, m = mm÷1000.
@@ -462,19 +464,15 @@ class InputPanel(QWidget):
             self._load(path, which)
 
     def _load(self, path: str, which: str) -> None:
-        import imageio.v2 as imageio
-
         try:
-            arr = imageio.imread(path)
+            # the SAME loader the batch uses (studio.pairs), so a hand-dropped
+            # image and a batched one can never be converted differently
+            arr = load_rgb(path)
         except Exception as exc:  # noqa: BLE001
             # was a bare `return`: dropping an unreadable/unsupported file did
             # NOTHING AT ALL on screen — no tile, no message, no clue why.
             self.notice.emit(f"Couldn't open {os.path.basename(path)}: {exc}")
             return
-        arr = np.asarray(arr)
-        if arr.ndim == 2:
-            arr = np.stack([arr] * 3, -1)
-        arr = arr[..., :3].astype(np.uint8)
         if which == "left":
             self.left_path, self.left_raw = path, arr
             if not self._rect_mode_on:
@@ -490,8 +488,30 @@ class InputPanel(QWidget):
         # it, even over prior calibration, so switching pairs can never silently
         # reuse the wrong intrinsics. (If none sits beside it, keep what's there.)
         k = os.path.join(os.path.dirname(img_path), "K.txt")
-        if os.path.isfile(k):
-            self._parse_ktxt(k)
+        if not os.path.isfile(k):
+            return
+        # …authoritative only if it plausibly BELONGS to this image. The repo's
+        # demo assets/K.txt (960×540 camera, cx≈489) sitting beside a user's
+        # 2664×2304 pair used to be applied silently — ~3.4× wrong fx and 12.6×
+        # wrong baseline, i.e. confidently wrong metric depth with no warning.
+        # Any real (rectified) camera's principal point sits near the image
+        # centre, so a cx/cy outside the middle half of THIS frame means the
+        # file describes a different camera/resolution.
+        if self.left_raw is not None:
+            try:
+                with open(k) as f:
+                    vals = [float(x) for x in f.read().split()[:6]]
+                cx, cy = vals[2], vals[5]
+                h, w = self.left_raw.shape[:2]
+                if not (0.25 * w <= cx <= 0.75 * w and 0.25 * h <= cy <= 0.75 * h):
+                    self.notice.emit(
+                        f"Ignored {os.path.basename(k)} next to this image — its principal "
+                        f"point ({cx:.0f}, {cy:.0f}) doesn't fit a {w}×{h} image (it looks "
+                        "like another camera's calibration). Load the right file manually.")
+                    return
+            except Exception:  # noqa: BLE001 — unreadable/short: let _parse_ktxt report it
+                pass
+        self._parse_ktxt(k)
 
     def _load_ktxt(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Load K.txt", "", "Calib (*.txt)")
@@ -511,8 +531,14 @@ class InputPanel(QWidget):
                 raise ValueError("file is empty")
             vals = list(map(float, lines[0].split()))
             if len(vals) < 6:
-                raise ValueError("first line must hold the 3×3 K matrix (9 numbers)")
+                raise ValueError("first line must hold the row-major K matrix "
+                                 "(9 numbers; the first 6 — fx 0 cx 0 fy cy — suffice)")
             baseline_m = float(lines[1].split()[0]) if len(lines) > 1 else 0.0
+            # float("nan") parses fine — without this a NaN fx lands in the spin
+            # (Qt clamps it arbitrarily) while a NaN baseline fails `> 0` and
+            # silently KEEPS the previous pair's baseline: a mixed calibration
+            if not all(math.isfinite(v) for v in vals[:6]) or not math.isfinite(baseline_m):
+                raise ValueError("contains a non-finite number (NaN/Inf)")
         except Exception as exc:  # noqa: BLE001
             self.notice.emit(f"Couldn't read {os.path.basename(path)}: {exc}")
             return False
@@ -539,6 +565,13 @@ class InputPanel(QWidget):
         self.load_k.setVisible(not raw)
         self._set_fields_readonly(raw)
         if raw:
+            if self._calib is None:
+                # Entering raw mode with NO calibration loaded: the fields still
+                # held the previous manual/K.txt intrinsics, now presented
+                # read-only as if derived — and has_calibration stayed True, so a
+                # Run computed metric depth for UNRECTIFIED images with them.
+                # Blank the fields until a calibration actually derives values.
+                self._clear_derived_calibration()
             self._ensure_rectifier()
         else:
             self._rectifier = None
@@ -549,11 +582,11 @@ class InputPanel(QWidget):
 
     def _set_fields_readonly(self, ro: bool) -> None:
         """In raw mode the intrinsics are DERIVED from rectification, so the fields
-        become a read-only readout rather than an input."""
+        become a read-only readout rather than an input. Button symbols are left
+        alone: make_spin builds every field with NoButtons, and restoring
+        UpDownArrows here grew arrow buttons the fields never had."""
         for s in (self.fx, self.fy, self.cx, self.cy, self.baseline):
             s.setReadOnly(ro)
-            s.setButtonSymbols(QAbstractSpinBox.NoButtons if ro
-                               else QAbstractSpinBox.UpDownArrows)
 
     def _load_calibration(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -716,8 +749,14 @@ class InputPanel(QWidget):
             try:
                 self._calib = StereoCalibration.load(path)
                 self._calib_path = path
-            except Exception:  # noqa: BLE001 — a stale/broken calib must not wedge startup
+            except Exception as exc:  # noqa: BLE001 — a broken calib must not wedge startup
                 self._calib, self._calib_path = None, ""
+                # parity with the missing-file branch below: a PRESENT but
+                # unreadable file was swallowed silently, leaving raw mode with
+                # only the small "no calibration loaded" label as explanation
+                self.notice.emit(
+                    f"Saved calibration couldn't be read ({os.path.basename(path)}: "
+                    f"{str(exc).splitlines()[0][:120]}) — re-load it to rectify.")
             self.rect_mode.setCurrentIndex(1)   # fires _on_rect_mode → sets up the UI
             self._refresh_calib_status()
         elif path:
@@ -1517,11 +1556,19 @@ class ParamPanel(QWidget):
         clean = []
         for p in raw if isinstance(raw, list) else []:
             try:
-                clean.append({"name": str(p["name"]),
-                              "c": [float(x) for x in p["c"]][:3],
-                              "s": [float(x) for x in p["s"]][:3],
-                              "q": [float(x) for x in p["q"]][:4],
-                              "trim": float(p["trim"])})
+                d = {"name": str(p["name"]),
+                     "c": [float(x) for x in p["c"]][:3],
+                     "s": [float(x) for x in p["s"]][:3],
+                     "q": [float(x) for x in p["q"]][:4],
+                     "trim": float(p["trim"])}
+                # json round-trips NaN/Infinity, and a non-finite trim reaches
+                # StatSlider.setValue → int(round(nan)) → ValueError INSIDE
+                # _restore_settings — the exact "one bad settings value stops the
+                # app from starting" class the param sliders already guard against
+                if not all(math.isfinite(v)
+                           for v in d["c"] + d["s"] + d["q"] + [d["trim"]]):
+                    continue
+                clean.append(d)
             except (KeyError, TypeError, ValueError, IndexError):
                 continue
         self._boxes = [p for p in clean if len(p["c"]) == 3 and len(p["s"]) == 3

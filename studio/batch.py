@@ -21,20 +21,11 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QFileDialog, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QProgressBar,
                                QPushButton, QVBoxLayout, QWidget)
 
-IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".ppm", ".pgm", ".webp"}
+# the ONE loader + extension list, shared with the Input panel (studio.pairs) —
+# a batched pair is by construction fed to the engine exactly as a hand-dropped one
+from .pairs import IMG_EXTS, load_rgb  # noqa: F401  (load_rgb re-exported for callers)
+
 CLOUD_EXTS = {".ply", ".npy", ".pcd", ".xyz"}
-
-
-def load_rgb(path: str) -> np.ndarray:
-    """Read an image as HxWx3 uint8 RGB — byte-for-byte the same steps as the
-    Input panel's loader (panels.InputPanel._load), so a batched pair feeds the
-    engine exactly as a hand-dropped one does."""
-    import imageio.v2 as imageio
-
-    arr = np.asarray(imageio.imread(path))
-    if arr.ndim == 2:
-        arr = np.stack([arr] * 3, -1)
-    return arr[..., :3].astype(np.uint8)
 
 
 def load_cloud(path: str):
@@ -155,10 +146,15 @@ def _sibling_lr(folder: str):
 def _stem_map(files: list):
     """{stem: filename} plus the files whose stem collided with an earlier one
     (e.g. 1.png and 1.jpg) — those are ambiguous, kept as 'dropped' so they're
-    reported rather than silently vanishing."""
+    reported rather than silently vanishing.
+
+    Stems are lower-cased for MATCHING (values keep the real filename) — the same
+    rule _pair_by_family documents: Windows filesystems are case-insensitive, so
+    left/CAP_01.PNG must pair with right/cap_01.png instead of silently falling
+    back to positional-order pairing."""
     m, dropped = {}, []
     for f in files:
-        stem = os.path.splitext(f)[0]
+        stem = os.path.splitext(f)[0].lower()
         if stem in m:
             dropped.append(f)
         else:
@@ -295,8 +291,10 @@ class BatchDialog(QDialog):
         ulbl = QLabel("These files are saved in:")
         ulbl.setProperty("role", "muted")
         self.unit_combo = QComboBox()
-        self.unit_combo.addItems(["mm", "m"])
-        self.unit_combo.setCurrentText(current_unit if current_unit in ("mm", "m") else "mm")
+        # every unit the app can EXPORT in — µm was missing, so a µm session's own
+        # PLYs had to be declared mm and were scaled ×1000 (boxes caught nothing)
+        self.unit_combo.addItems(["mm", "µm", "m"])
+        self.unit_combo.setCurrentText(current_unit if current_unit in ("mm", "µm", "m") else "mm")
         self.unit_combo.setFixedWidth(70)
         ur.addWidget(ulbl)
         ur.addWidget(self.unit_combo)
@@ -384,7 +382,10 @@ class BatchDialog(QDialog):
                 self, "Choose point-cloud files", "",
                 "Point clouds (*.ply *.npy *.pcd *.xyz);;All files (*)")
             if files:
-                self._set_files(files)
+                # the button says "Add files…" — append (dedup), don't replace;
+                # switching modes is what clears the selection
+                self._set_files(self._files
+                                + [f for f in files if f not in self._files])
 
     def _scan_folder(self, folder: str) -> None:
         self._scan = find_pairs(folder)
@@ -471,10 +472,15 @@ class BatchDialog(QDialog):
 
     def on_finished(self, summary: str, failed: list | None = None) -> None:
         self._running = False
-        self.bar.setValue(self.bar.maximum())
+        # do NOT force the bar to maximum: a batch aborted at 10/900 (engine
+        # death) showed a FULL bar under a "Batch stopped" summary. on_progress
+        # already left it at the true count.
         self.summary.setText(summary)
         self.run_btn.setText("Run batch")
-        self.run_btn.setEnabled(False)
+        # the scan/selection is still valid — allow re-running it (readings are
+        # ADDED to the table, as the note says; Clear the table for a fresh study)
+        self.run_btn.setEnabled(bool(self._scan and self._scan.pairs)
+                                if self._mode == "pairs" else bool(self._files))
         self.close_btn.setEnabled(True)
         self.browse_btn.setEnabled(True)
         self.preview.setEnabled(True)
