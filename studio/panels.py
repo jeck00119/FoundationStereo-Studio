@@ -1001,7 +1001,7 @@ class ParamPanel(QWidget):
         mb.setSpacing(11)
         self.sec_measure.add(self.measure_body)
 
-        self.measure_hint = QLabel("click Depth to place it")
+        self.measure_hint = QLabel("click the Depth / Disparity map to place it")
         self.measure_hint.setProperty("role", "muted")
         self.measure_hint.setStyleSheet("font-size:11px;")
         mb.addWidget(self.measure_hint)
@@ -1044,22 +1044,19 @@ class ParamPanel(QWidget):
                 "shows both: when they disagree badly, the box is full of noise.")
         mb.addWidget(self.trim)
 
+        # pin analysis acts on the SELECTED box, so it lives here next to the box
+        # list — it used to sit in Analyze, a section away from the box it needs
+        self.pin_btn = QPushButton("Analyze selected pin")
+        self.pin_btn.setToolTip("Analyze the SELECTED measure box's pin: height above its "
+                                "local board and how vertical the pin is.")
+        self.pin_btn.clicked.connect(self.pinAnalyzeRequested)
+        mb.addWidget(self.pin_btn)
+
         self.box_log = QPushButton("＋  Log reading")
         self.box_log.setToolTip("Record the current pin heights (every box) as one capture "
                                 "in the Repeatability tab — build up a mean · σ · range per pin.")
         self.box_log.clicked.connect(self.logRequested)
         mb.addWidget(self.box_log)
-
-        self.level_btn = QPushButton("Level to board plane")
-        self.level_btn.setObjectName("Toggle")   # fills accent when ON (checked)
-        self.level_btn.setCheckable(True)
-        self.level_btn.setToolTip(
-            "Fit the flat PCB surface and rotate the whole cloud so the board sits "
-            "straight (facing you). Pin heights are then measured perpendicular to the "
-            "BOARD, not the camera — so a tilted mount can't bias them. Applies to every "
-            "cloud, including a batch.")
-        self.level_btn.toggled.connect(self.levelRequested)
-        mb.addWidget(self.level_btn)
 
         # Precise numeric centre / size — folded away by default. The box is normally
         # placed with the 3D handles or by clicking the Depth tab, so these are the
@@ -1097,6 +1094,20 @@ class ParamPanel(QWidget):
         # --- analyze (point-cloud analysis tools) ---
         self.sec_analyze = CollapsibleSection("Analyze", "Live", "live")
         lay.addWidget(self.sec_analyze)
+        # Level heads the section: every analyze height references the board
+        # plane, so this is the master "make heights board-true" switch. It used
+        # to live inside the Measure body — reachable ONLY with the Volume box
+        # switched on, though levelling matters just as much without it.
+        self.level_btn = QPushButton("Level to board plane")
+        self.level_btn.setObjectName("Toggle")   # fills accent when ON (checked)
+        self.level_btn.setCheckable(True)
+        self.level_btn.setToolTip(
+            "Fit the flat PCB surface and rotate the whole cloud so the board sits "
+            "straight (facing you). Pin heights are then measured perpendicular to the "
+            "BOARD, not the camera — so a tilted mount can't bias them. Applies to every "
+            "cloud, including a batch.")
+        self.level_btn.toggled.connect(self.levelRequested)
+        self.sec_analyze.add(self.level_btn)
         self._ANALYZE_TOOLS = ["", "profile", "distance", "region", "point"]
         self.analyze_combo = no_wheel(QComboBox())
         self.analyze_combo.addItems(["Off", "Surface angle · pick 2", "Distance · pick 2",
@@ -1149,6 +1160,7 @@ class ParamPanel(QWidget):
             "height (correcting the cloud's systematic bow), and its max−min is reported as "
             "the flatness uncertainty. Press again to remove the correction.")
         self.ref_btn.toggled.connect(self.flatRefToggled)
+        self.ref_btn.toggled.connect(lambda *_: self._sync_ref_visibility())
         self.sec_analyze.add(self.ref_btn)
         self.ref_lbl = QLabel("")
         self.ref_lbl.setProperty("role", "muted")
@@ -1156,7 +1168,7 @@ class ParamPanel(QWidget):
         self.ref_lbl.setWordWrap(True)
         self.sec_analyze.add(self.ref_lbl)
 
-        # standalone actions (whole-cloud / selected-box), set off below a divider
+        # whole-cloud action, set off below a divider
         rule = QFrame(); rule.setObjectName("InfoRule"); rule.setFixedHeight(1)
         self.sec_analyze.add(rule)
         self.dev_btn = QPushButton("Deviation heatmap")
@@ -1165,14 +1177,21 @@ class ParamPanel(QWidget):
         self.dev_btn.setToolTip("Recolour the cloud by distance from the board plane "
                                 "(blue low → red high), so a bow or high/low spot pops out.")
         self.dev_btn.toggled.connect(self.deviationToggled)
-        self.pin_btn = QPushButton("Analyze selected pin")
-        self.pin_btn.setToolTip("Analyze the SELECTED measure box's pin: height above its "
-                                "local board, tip position, and how vertical the pin is.")
-        self.pin_btn.clicked.connect(self.pinAnalyzeRequested)
         self.sec_analyze.add(self.dev_btn)
-        self.sec_analyze.add(self.pin_btn)
 
         lay.addStretch(1)
+
+        # tool-contextual visibility: Isolate only affects region/profile picks,
+        # the flat-reference pair only means anything around a Region measurement
+        # (or while a reference is actively applied), and an idle result card is
+        # just noise — start everything in its "tool off" state.
+        self.isolate_btn.setVisible(False)
+        self._sync_ref_visibility("")
+        self.analyze_card.hide()
+        # gated OFF until the window reports calibration / a cloud (it re-syncs
+        # these on every state change via _sync_panel_gates)
+        self.set_calibration_ready(False)
+        self.set_cloud_ready(False)
 
         for w in (self.box_cx, self.box_cy, self.box_cz,
                   self.box_sx, self.box_sy, self.box_sz):
@@ -1467,26 +1486,65 @@ class ParamPanel(QWidget):
         self.level_btn.blockSignals(False)
 
     # ------------------------------------------------------------- analyze
+    def _current_tool(self) -> str:
+        idx = self.analyze_combo.currentIndex()
+        return self._ANALYZE_TOOLS[idx] if 0 <= idx < len(self._ANALYZE_TOOLS) else ""
+
     def _on_analyze_combo(self, idx: int) -> None:
         tool = self._ANALYZE_TOOLS[idx] if 0 <= idx < len(self._ANALYZE_TOOLS) else ""
         self.analyze_plot.setVisible(tool == "profile")
+        self.isolate_btn.setVisible(tool in ("region", "profile"))
+        self._sync_ref_visibility(tool)
         self.analyzeToolChanged.emit(tool)
 
+    def _sync_ref_visibility(self, tool: str | None = None) -> None:
+        """Show the flat-reference pair only where it can act: around a Region
+        measurement, or while a reference is APPLIED (so it can always be
+        removed). Anywhere else the two rows were permanent dead weight."""
+        tool = self._current_tool() if tool is None else tool
+        show = tool == "region" or self.ref_btn.isChecked()
+        self.ref_btn.setVisible(show)
+        self.ref_lbl.setVisible(show and bool(self.ref_lbl.text()))
+
     def set_analyze_out(self, text: str) -> None:
-        """Hint / empty / error state — a single muted line in the card."""
-        self.analyze_card.show_message(text or "Pick points on the cloud to measure.")
+        """Hint / empty / error state — a single muted line in the card. Empty
+        text means NOTHING to say: the card hides entirely instead of parking a
+        placeholder hint in the panel."""
+        if not text:
+            self.analyze_card.hide()
+            return
+        self.analyze_card.show_message(text)
+        self.analyze_card.show()
 
     def set_analyze_result(self, eyebrow, value, unit="", rows=None, caption="") -> None:
         """A measurement — big headline value + an aligned key/value table."""
         self.analyze_card.show_result(eyebrow, value, unit, rows, caption)
+        self.analyze_card.show()
 
     def set_flat_ref_text(self, text: str) -> None:
         self.ref_lbl.setText(text or "")
+        self._sync_ref_visibility()
 
     def set_flat_ref_checked(self, on: bool) -> None:
         self.ref_btn.blockSignals(True)
         self.ref_btn.setChecked(bool(on))
         self.ref_btn.blockSignals(False)
+        self._sync_ref_visibility()
+
+    # ------------------------------------------------------- state gating
+    def set_calibration_ready(self, on: bool) -> None:
+        """Cloud settings only do anything once metric depth is possible."""
+        self.sec_cloud.set_gate_hint(
+            None if on else "Needs calibration — load a K.txt or enter fx + baseline "
+                            "in the left panel.")
+
+    def set_cloud_ready(self, on: bool) -> None:
+        """Measure/Analyze act on the 3D cloud — swapped for a one-line hint
+        until one exists, so the panel isn't a wall of controls that do nothing.
+        Values/boxes are kept; only visibility changes."""
+        hint = None if on else "Run a pair (with calibration) to build the 3D cloud first."
+        self.sec_measure.set_gate_hint(hint)
+        self.sec_analyze.set_gate_hint(hint)
 
     def set_deviation_checked(self, on: bool) -> None:
         """Sync the Deviation button without emitting (the window drives the heatmap)."""

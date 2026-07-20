@@ -129,6 +129,7 @@ class MainWindow(QMainWindow):
         self._measure_timer.timeout.connect(self._remeasure)
 
         self._restore_settings()   # may restore a non-mm unit → needs the timers above
+        self._sync_panel_gates()   # initial gate state (no cloud yet; calib per restore)
 
         # NOTHING is loaded at startup. Opening the app used to spend ~20 s and up
         # to 3 GB of VRAM on whichever model you happened to close with — before
@@ -216,6 +217,7 @@ class MainWindow(QMainWindow):
         self.input_panel.imagesChanged.connect(self._on_images)
         self.input_panel.calibrationChanged.connect(self._update_run_enabled)
         self.input_panel.calibrationChanged.connect(self._mark_stale)
+        self.input_panel.calibrationChanged.connect(self._sync_panel_gates)
         self.input_panel.notice.connect(self._set_status)
         self.input_panel.modelChanged.connect(self._on_model_changed)
         self.input_panel.checkpointChanged.connect(self._on_checkpoint_changed)
@@ -725,6 +727,15 @@ class MainWindow(QMainWindow):
         name = self._short_name(self._shown_model) if self._shown_model else ""
         return [(name, self.cloud)]
 
+    def _sync_panel_gates(self) -> None:
+        """Tell the parameter panel which sections currently CAN do anything:
+        cloud settings need calibration, Measure/Analyze need a cloud on screen.
+        Called from the two places display state changes funnel through
+        (_apply_measure runs on every cloud change; _clear_results on every
+        clear) plus calibration edits — cheap and idempotent."""
+        self.param_panel.set_calibration_ready(self.input_panel.has_calibration)
+        self.param_panel.set_cloud_ready(self._has_points(self.cloud))
+
     def _apply_measure(self) -> None:
         """Push the whole set of boxes into the 3D view (drawing them all + the
         selected one's drag handles). The authoritative path — every non-drag trigger
@@ -733,6 +744,7 @@ class MainWindow(QMainWindow):
         Pure numpy over the cached cloud — no engine round-trip, so it stays instant
         while you drag a spin, and it works with the child busy.
         """
+        self._sync_panel_gates()
         cv = self.viewer.cloud_view
         on = self.param_panel.measure_on
         if on:
@@ -1676,6 +1688,7 @@ class MainWindow(QMainWindow):
         self.probe_lbl.setText("")
         self._reset_analyze_overlay()   # picks/overlay belonged to the cleared cloud
         self._update_compare_strip()
+        self._sync_panel_gates()        # no cloud any more — Measure/Analyze gate off
 
     def _on_images(self) -> None:
         # a changed pair invalidates the previous result — clear it so stale

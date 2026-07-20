@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout, QLabel,
 
 from .dtypes import UNIT_DECIMALS
 from .measure import MeasureBox
-from .widgets import CLOUD_COLOR_MODES, CloudLegend, FlowLayout, ModelBar, no_wheel
+from .widgets import CloudLegend, FlowLayout, ModelBar, no_wheel
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _WEB_SRC = os.path.join(_HERE, "web")
@@ -179,6 +179,7 @@ class WebCloudView(QWidget):
         self.model_bar = ModelBar()
         self.overlay_chk = QCheckBox("Overlay")
         self.overlay_chk.setEnabled(False)
+        self.overlay_chk.setVisible(False)   # only exists once ≥2 model clouds do
         self.overlay_chk.setToolTip(
             "Draw every compared model's cloud at once, each in its own colour, "
             "instead of one at a time.\n\nWhere they overlap the colours mix — what "
@@ -188,7 +189,7 @@ class WebCloudView(QWidget):
         self.legend = CloudLegend()
         self.legend.toggled.connect(self._on_model_visible)
         self.color_combo = no_wheel(QComboBox())
-        self.color_combo.addItems(CLOUD_COLOR_MODES)
+        self.color_combo.addItems(["Photo"])   # real modes appear WITH their data
         self.color_combo.setFixedWidth(130)
         self.color_combo.setToolTip(
             "How to paint the points:\n"
@@ -232,8 +233,14 @@ class WebCloudView(QWidget):
         flow.addWidget(self.model_bar)
         flow.addWidget(self.overlay_chk)
         flow.addWidget(self.legend)
-        flow.addWidget(_ctl_group(QLabel("Color"), self.color_combo))
-        flow.addWidget(_ctl_group(QLabel("In box"), self.hi_combo, self.isolate_chk))
+        # the label+control groups hide as a UNIT when they can't apply — a
+        # permanently disabled combo still reads as "something you should use"
+        self._color_group = _ctl_group(QLabel("Color"), self.color_combo)
+        self._inbox_group = _ctl_group(QLabel("In box"), self.hi_combo, self.isolate_chk)
+        self._color_group.setVisible(False)   # photo-only: nothing to choose yet
+        self._inbox_group.setVisible(False)   # no editable box yet
+        flow.addWidget(self._color_group)
+        flow.addWidget(self._inbox_group)
         flow.addWidget(self.cloud_lbl)
 
         lay = QVBoxLayout(self)
@@ -312,6 +319,7 @@ class WebCloudView(QWidget):
         # late (two in-flight fetches otherwise resolved last-completion-wins)
         self._js(f"api.loadCloud('{name}', {n}, {flags}, "
                  f"{1 if reset_view else 0}, {self._cloud_seq})")
+        self._refresh_color_modes()
         self._update_cloud_lbl()
 
     def set_cloud_colors(self, colors) -> None:
@@ -345,6 +353,39 @@ class WebCloudView(QWidget):
         self._has_right = False
         self.legend.clear()
         self.cloud_lbl.setText("")
+        self._refresh_color_modes()               # back to photo-only (group hides)
+        self._inbox_group.setVisible(False)
+
+    # ------------------------------------------------------- colour-mode combo
+    def _available_color_modes(self) -> list:
+        """Only the modes the CURRENT cloud carries data for. Every mode used to
+        be listed always; picking one without its per-point array silently fell
+        back to photo colours, which read as 'the combo does nothing'."""
+        modes = ["Photo"]
+        if self._model is not None and self._model_names:
+            modes.append("Model")
+        if self._has_right:
+            modes.append("Camera (L·R)")
+        if self._reliable is not None:
+            modes.append("Reliability")
+        return modes
+
+    def _refresh_color_modes(self) -> None:
+        want = self._available_color_modes()
+        have = [self.color_combo.itemText(i) for i in range(self.color_combo.count())]
+        if want != have:
+            cur = self.color_combo.currentText()
+            self.color_combo.blockSignals(True)
+            self.color_combo.clear()
+            self.color_combo.addItems(want)
+            self.color_combo.setCurrentText(cur if cur in want else "Photo")
+            self.color_combo.blockSignals(False)
+        # the selection may just have FALLEN BACK — push the effective mode
+        eff = _MODE.get(self.color_combo.currentText(), "photo")
+        if eff != self._color_mode:
+            self._color_mode = eff
+            self._js(f"api.setColorMode('{eff}')")
+        self._color_group.setVisible(len(want) > 1)   # photo-only: nothing to choose
 
     # ------------------------------------------------------- colour / models
     def _on_color_mode(self, text: str) -> None:
@@ -375,6 +416,7 @@ class WebCloudView(QWidget):
     # ------------------------------------------------------------ overlay
     def set_overlay_available(self, on: bool) -> None:
         self.overlay_chk.setEnabled(on)
+        self.overlay_chk.setVisible(on)   # a never-enabled checkbox is just clutter
         if not on:
             self.set_overlay_checked(False)
 
@@ -392,10 +434,12 @@ class WebCloudView(QWidget):
                 "q": [_fin(b.qx), _fin(b.qy), _fin(b.qz), _fin(b.qw)]} for b in views]
         self._js(f"api.setBoxes({json.dumps(arr)}, {int(selected)}, "
                  f"{'true' if editable else 'false'})")
-        # the in-box highlight controls only mean anything with a box to edit
+        # the in-box highlight controls only mean anything with a box to edit —
+        # the whole label+combo group appears and disappears with that state
         active = editable and bool(views)
         self.hi_combo.setEnabled(active)
         self.isolate_chk.setEnabled(active)
+        self._inbox_group.setVisible(active)
 
     def set_measurement(self, text: str) -> None:
         # JSON-encode so newlines/quotes in the readout survive the trip to JS

@@ -104,3 +104,98 @@ def test_toggle_switch_blocked_setchecked_paints_right_state(qapp):
     sw.setChecked(False)
     sw.blockSignals(False)
     assert not sw.isChecked() and sw._offset == 0.0
+
+
+# --------------------------------------------------- panel gating / context
+def test_collapsible_gate_hint(qapp):
+    from studio.widgets import CollapsibleSection
+    from PySide6.QtWidgets import QLabel
+
+    sec = CollapsibleSection("Test", expanded=True)
+    inner = QLabel("content")
+    sec.add(inner)
+    assert not sec.is_gated()
+    sec.set_gate_hint("locked until X")
+    assert sec.is_gated()
+    assert not sec.body.isVisibleTo(sec)      # body swapped out...
+    assert sec._gate.isVisibleTo(sec)         # ...for the hint line
+    sec.set_gate_hint(None)
+    assert not sec.is_gated()
+    assert sec.body.isVisibleTo(sec)
+    sec.set_expanded(False)                   # collapsed: neither shows
+    sec.set_gate_hint("locked")
+    assert not sec.body.isVisibleTo(sec) and not sec._gate.isVisibleTo(sec)
+
+
+def test_parampanel_starts_gated_and_ungates(qapp):
+    from studio.panels import ParamPanel
+
+    p = ParamPanel()
+    assert p.sec_cloud.is_gated()             # no calibration yet
+    assert p.sec_measure.is_gated()           # no cloud yet
+    assert p.sec_analyze.is_gated()
+    p.set_calibration_ready(True)
+    p.set_cloud_ready(True)
+    assert not p.sec_cloud.is_gated()
+    assert not p.sec_measure.is_gated()
+    assert not p.sec_analyze.is_gated()
+    # gating must not disturb values/boxes
+    p.set_cloud_ready(False)
+    assert p.measure_on is False
+    assert isinstance(p.values(), dict)
+
+
+def test_analyze_tool_contextual_visibility(qapp):
+    from studio.panels import ParamPanel
+
+    p = ParamPanel()
+    p.set_cloud_ready(True)
+    assert not p.isolate_btn.isVisibleTo(p)   # tool Off
+    assert not p.ref_btn.isVisibleTo(p)
+    p.analyze_combo.setCurrentIndex(1)        # profile
+    assert p.isolate_btn.isVisibleTo(p)
+    assert p.analyze_plot.isVisibleTo(p)
+    assert not p.ref_btn.isVisibleTo(p)       # flat-ref is a Region concept
+    p.analyze_combo.setCurrentIndex(2)        # distance
+    assert not p.isolate_btn.isVisibleTo(p)
+    p.analyze_combo.setCurrentIndex(3)        # region
+    assert p.isolate_btn.isVisibleTo(p)
+    assert p.ref_btn.isVisibleTo(p)
+    p.analyze_combo.setCurrentIndex(0)        # off again
+    assert not p.isolate_btn.isVisibleTo(p) and not p.ref_btn.isVisibleTo(p)
+    # an APPLIED reference stays visible whatever the tool, so it can be removed
+    p.set_flat_ref_checked(True)
+    assert p.ref_btn.isVisibleTo(p)
+    p.set_flat_ref_checked(False)
+    assert not p.ref_btn.isVisibleTo(p)
+
+
+def test_analyze_card_hides_when_idle(qapp):
+    from studio.panels import ParamPanel
+
+    p = ParamPanel()
+    p.set_cloud_ready(True)                   # ungate the section around the card
+    assert not p.analyze_card.isVisibleTo(p)  # idle at construction
+    p.set_analyze_out("Click two points on the cloud.")
+    assert p.analyze_card.isVisibleTo(p)
+    p.set_analyze_out("")
+    assert not p.analyze_card.isVisibleTo(p)
+    p.set_analyze_result("Distance", "1.234", "mm")
+    assert p.analyze_card.isVisibleTo(p)
+
+
+def test_level_and_pin_buttons_new_homes(qapp):
+    """Level lives in Analyze (usable without the Volume box); pin analysis
+    lives in the Measure body next to the box it acts on."""
+    from studio.panels import ParamPanel
+
+    p = ParamPanel()
+    assert p.level_btn.parent() is p.sec_analyze.body
+    assert p.measure_body.isAncestorOf(p.pin_btn)
+    # signals still wired
+    fired = []
+    p.levelRequested.connect(lambda on: fired.append(("level", on)))
+    p.pinAnalyzeRequested.connect(lambda: fired.append(("pin", None)))
+    p.level_btn.setChecked(True)
+    p.pin_btn.click()
+    assert ("level", True) in fired and ("pin", None) in fired

@@ -85,7 +85,6 @@ CLOUD_LEFT_RGB = (74, 144, 226)     # left eye  — cool blue
 CLOUD_RIGHT_RGB = (245, 145, 60)    # right eye — warm orange
 CLOUD_OK_RGB = (70, 200, 130)       # reliable  — green
 CLOUD_BAD_RGB = (235, 80, 100)      # occluded  — red
-CLOUD_COLOR_MODES = ["Photo", "Camera (L·R)", "Reliability", "Model"]
 # one per model, in registry order, deliberately far apart in hue so two models'
 # points can be told apart where they land almost on top of each other
 CLOUD_MODEL_RGB = [
@@ -528,10 +527,20 @@ class CollapsibleSection(QWidget):
         self._body_lay.setContentsMargins(0, 0, 0, 0)
         self._body_lay.setSpacing(body_spacing)
 
+        # gate hint — when the app state a section needs is missing (no cloud, no
+        # calibration), the whole body is swapped for this one muted line saying
+        # what unlocks it, instead of a column of controls that do nothing yet
+        self._gate = QLabel()
+        self._gate.setProperty("role", "muted")
+        self._gate.setWordWrap(True)
+        self._gate.setStyleSheet("font-size:11px; padding-left:4px;")
+        self._gate.hide()
+
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(8)
         lay.addWidget(self.header)
+        lay.addWidget(self._gate)
         lay.addWidget(self.body)
         self.header.clicked.connect(self._on_click)
         self._sync()
@@ -542,7 +551,19 @@ class CollapsibleSection(QWidget):
 
     def _sync(self) -> None:
         self._arrow.setText("▾" if self._expanded else "▸")
-        self.body.setVisible(self._expanded)
+        gated = bool(self._gate.text())
+        self.body.setVisible(self._expanded and not gated)
+        self._gate.setVisible(self._expanded and gated)
+
+    def set_gate_hint(self, hint: str | None) -> None:
+        """Gate the section on missing app state: a non-empty hint replaces the
+        body with that one line; None/empty restores the body. Folding keeps
+        working either way, and the widgets keep their values while hidden."""
+        self._gate.setText(hint or "")
+        self._sync()
+
+    def is_gated(self) -> bool:
+        return bool(self._gate.text())
 
     def set_expanded(self, on: bool) -> None:
         self._expanded = bool(on)
