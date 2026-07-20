@@ -65,3 +65,26 @@ def test_region_rms_is_true_rms_of_gaussian_noise():
     assert r is not None
     assert abs(r["rms"] - sigma) / sigma < 0.15
     assert abs(r["z_mean"]) < 0.01           # the patch sits ON the board plane
+
+
+def test_surface_profile_recovers_known_ramp_angle():
+    """A plane tilted by a known angle about X: the profile's slope angle and
+    rise must match, and the plotted t/h arrays must span the picked line."""
+    from studio.analyze import surface_profile
+
+    rng = _rng()
+    ang = np.deg2rad(5.0)
+    xy = rng.uniform(-10, 10, (40000, 2))
+    # height above the board grows with y at tan(5°); board plane at z=10, n=-Z:
+    # a point's z = 10 - h  (h measured along -Z toward the camera)
+    h = np.tan(ang) * xy[:, 1] + rng.normal(0, 0.01, len(xy))
+    pts = np.column_stack([xy[:, 0], xy[:, 1], 10.0 - h])
+    A = np.array([0.0, -8.0, 10.0 - np.tan(ang) * -8.0])
+    B = np.array([0.0, 8.0, 10.0 - np.tan(ang) * 8.0])
+    r = surface_profile(pts, A, B, BOARD_N, BOARD_C)
+    assert r is not None
+    assert abs(abs(r["angle"]) - 5.0) < 0.3
+    assert abs(abs(r["d_height"]) - 16.0 * np.tan(ang)) < 0.05
+    assert len(r["t"]) == len(r["h"]) >= 2
+    assert 0.0 <= r["t"][0] and r["t"][-1] <= 16.0 + 1e-6   # bins live on the picked line
+    assert r["poly"].shape[1] == 3                           # 3D polyline for the view

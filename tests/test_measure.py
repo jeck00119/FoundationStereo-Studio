@@ -59,3 +59,43 @@ def test_scaled_box_tracks_unit_switch():
     s = box.scaled(1000.0)
     assert (s.cx, s.cy, s.cz, s.sx, s.sy, s.sz) == (1000, -2000, 3000, 4000, 5000, 6000)
     assert (s.qx, s.qy, s.qz, s.qw) == (0.1, 0.2, 0.3, 0.9)   # rotation is unitless
+
+
+def test_trim_cleans_a_flyer():
+    """Raw span chases the single most extreme point; the trimmed span is the
+    repeatability-grade number — the diagnostic the readout is built around."""
+    pts = _pin_cloud(h=6.0, n=5000)
+    pts = np.vstack([pts, [[0.0, 0.0, 60.0]]]).astype(np.float32)   # one flyer far above
+    box = MeasureBox(cx=0, cy=0, cz=30.0, sx=2.0, sy=2.0, sz=62.0)
+    m = measure_box(pts, box, trim_pct=2.0)
+    assert m["h_span"] > 50.0                    # raw span measures the flyer
+    assert abs(m["h_span_t"] - 6.0) < 0.6        # trimmed span measures the pin
+    m0 = measure_box(pts, box, trim_pct=0.0)
+    assert abs(m0["h_span_t"] - m0["h_span"]) < 1e-9   # trim 0 == raw
+
+
+def test_fit_plane_latches_board_not_pins():
+    """A board plus tall pins: the two-pass fit must return the BOARD's normal."""
+    from studio.measure import fit_plane
+
+    rng = np.random.default_rng(11)
+    board = np.column_stack([rng.uniform(-20, 20, 20000),
+                             rng.uniform(-20, 20, 20000),
+                             rng.normal(0, 0.02, 20000)])
+    th = rng.uniform(0, 2 * np.pi, 2000)
+    pins = np.column_stack([np.cos(th), np.sin(th), rng.uniform(0, 8.0, 2000)])
+    n, c = fit_plane(np.vstack([board, pins]))
+    assert abs(abs(n[2]) - 1.0) < 1e-3           # normal is ±Z (the board)
+    assert abs(c[2]) < 0.5                       # centroid ON the board, not up the pins
+
+
+def test_rotation_to_axis_maps_normal_onto_target():
+    from studio.measure import rotation_to_axis
+
+    n = np.array([0.2, -0.3, -0.9]); n /= np.linalg.norm(n)
+    R = rotation_to_axis(n, (0.0, 0.0, -1.0))
+    np.testing.assert_allclose(R @ n, [0.0, 0.0, -1.0], atol=1e-9)
+    np.testing.assert_allclose(R @ R.T, np.eye(3), atol=1e-9)      # proper rotation
+    assert abs(np.linalg.det(R) - 1.0) < 1e-9
+    np.testing.assert_allclose(rotation_to_axis((0, 0, -1), (0, 0, -1)),
+                               np.eye(3), atol=1e-12)              # parallel → identity

@@ -984,9 +984,10 @@ class ParamPanel(QWidget):
         self.sec_measure = CollapsibleSection("Measure", "Live", "live")
         lay.addWidget(self.sec_measure)
         row, self.measure_sw = _toggle_row("Volume box", False,
-            "Put a box on the cloud and report what is inside it: how many points, the "
-            "nearest and farthest depth, the span between them, and how much of the box "
-            "the points actually fill.\n\n"
+            "Put a box on the cloud and report what is inside it: how many points it "
+            "caught, the height along the box's own axis (raw and Trim-cleaned — the "
+            "pin height once the box is aligned), its cross-section, and the world "
+            "depth range.\n\n"
             "With this on, CLICKING the Depth or Disparity tab drops the box on that "
             "pixel — far quicker than typing a centre in.")
         self.sec_measure.add(row)
@@ -1036,8 +1037,8 @@ class ParamPanel(QWidget):
 
         # Trim — the height-accuracy knob you reach for while reading a box.
         self.trim = StatSlider("Trim", 0.0, 10.0, 2.0, 0.5, "{:.1f}", " %",
-            tip="How much to shave off each end of the depth range before reporting "
-                "z-min / z-max.\n\n"
+            tip="How much to shave off each end of the box's HEIGHT range (along its "
+                "own axis) before reporting the trimmed height.\n\n"
                 "Raw min and max are ONE point each, and this rig's cloud already scatters "
                 "~0.6–1 mm about a flat surface — so the most extreme point in a box is a "
                 "flyer, and the raw span measures it rather than your part. The readout "
@@ -1047,8 +1048,9 @@ class ParamPanel(QWidget):
         # pin analysis acts on the SELECTED box, so it lives here next to the box
         # list — it used to sit in Analyze, a section away from the box it needs
         self.pin_btn = QPushButton("Analyze selected pin")
-        self.pin_btn.setToolTip("Analyze the SELECTED measure box's pin: height above its "
-                                "local board and how vertical the pin is.")
+        self.pin_btn.setToolTip("Analyze the SELECTED measure box's pin: height above the "
+                                "board plane (the levelled plane when Level is on) and "
+                                "how vertical the pin is.")
         self.pin_btn.clicked.connect(self.pinAnalyzeRequested)
         mb.addWidget(self.pin_btn)
 
@@ -1142,8 +1144,8 @@ class ParamPanel(QWidget):
         self.analyze_plot.setBackground(None)
         self.analyze_plot.setMenuEnabled(False)
         self.analyze_plot.showGrid(x=True, y=True, alpha=0.2)
-        self.analyze_plot.setLabel("left", "height")
-        self.analyze_plot.setLabel("bottom", "along line")
+        self.analyze_plot.setLabel("left", f"height ({self._units})")
+        self.analyze_plot.setLabel("bottom", f"along line ({self._units})")
         self._profile_curve = self.analyze_plot.plot(pen=pg.mkPen("#f4883f", width=2))
         self.analyze_plot.hide()
         self.sec_analyze.add(self.analyze_plot)
@@ -1674,3 +1676,7 @@ class ParamPanel(QWidget):
         for w, v in ((self.box_sx, box.sx), (self.box_sy, box.sy), (self.box_sz, box.sz)):
             self._reconf_spin(w, bs, v)
         # Trim is a percentage — unit-free, so it is deliberately NOT rescaled.
+        # The profile plot's DATA is cleared by the window on a unit switch (the
+        # picks die with the old frame) — only its axis labels carry the unit.
+        self.analyze_plot.setLabel("left", f"height ({unit})")
+        self.analyze_plot.setLabel("bottom", f"along line ({unit})")
