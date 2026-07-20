@@ -47,7 +47,7 @@ def _layer_mask(h, seed):
     pin joined to its board) stays whole, because 'connected' = no EMPTY height gap.
 
     Walks out from the seed through the SORTED heights and stops at the first GAP wider
-    than a level break — defined as a big fraction of the robust height spread (12 % of the
+    than a level break — defined as a big fraction of the robust height spread (18 % of the
     2–98 percentile range). A separate level (floating heads well above the board) leaves a
     gap that big; a single surface's own sparse TAIL, a sparse WALL down into a pit/defect,
     or a small/tilted patch have only small gaps, so the level — and its extremes and any
@@ -190,7 +190,10 @@ def region_flatness(points, A, B, n, c, isolate=False):
     corners = [corner(lo_u, lo_v), corner(hi_u, lo_v), corner(hi_u, hi_v),
                corner(lo_u, hi_v), corner(lo_u, lo_v)]
     return {"n_pts": int(dev.size),                         # points actually measured
-            "rms": float(np.std(resid)),
+            # true RMS, as the readout claims — resid is about the fit's INLIER
+            # plane, so its mean over the whole patch is nonzero and std would
+            # under-report whenever outliers are one-sided
+            "rms": float(np.sqrt(np.mean(resid ** 2))),
             "pp": float(np.quantile(resid, 0.98) - np.quantile(resid, 0.02)),
             "z_mean": float(np.mean(dev)),                  # mean height above the board
             "z_range": float(dev.max() - dev.min()),        # max−min height in the patch
@@ -229,9 +232,20 @@ def pin_analysis(points_in_box, n, c):
     vert = None
     if len(pin) >= 10:
         pc = pin.mean(0)
-        _, _, vt = np.linalg.svd(pin - pc, full_matrices=False)
-        axis = vt[0] / np.linalg.norm(vt[0])            # pin's principal axis
-        vert = float(np.degrees(np.arccos(np.clip(abs(axis @ n), 0, 1))))
+        _, sv, vt = np.linalg.svd(pin - pc, full_matrices=False)
+        # A stereo cloud is a VISIBLE-SURFACE shell: a flat-topped pin is mostly
+        # its top disc, whose first principal axis lies IN the disc — trusting it
+        # unconditionally read a perfectly vertical pin as ~90° tilted. Pick the
+        # axis by the blob's actual shape:
+        if sv[0] >= 2.0 * max(sv[1], 1e-12):
+            axis = vt[0]                # clearly elongated — the shaft direction
+        elif sv[2] <= 0.5 * max(sv[1], 1e-12):
+            axis = vt[-1]               # clearly flat — the top disc's normal
+        else:
+            axis = None                 # blob-like: no defensible axis → show "—"
+        if axis is not None:
+            axis = axis / np.linalg.norm(axis)
+            vert = float(np.degrees(np.arccos(np.clip(abs(axis @ n), 0, 1))))
     tip_pt = p[np.argmax(h)]
     return {"height": height, "tip": tip, "verticality": vert,
             "tip_pt": tip_pt.astype(np.float32), "n_pts": len(p)}

@@ -406,11 +406,14 @@ class ComparePanel(QWidget):
         for skey, _label, better in _STATS:
             if not better:
                 continue
-            # `is not None`, not truthiness: a model that scored 0.0 — no valid
-            # pixels, no measurable VRAM — LOST, and dropping it from the ranking
-            # entirely is not the same thing.
+            # `is not None`, not truthiness: a model that scored 0.0 valid pixels
+            # LOST, and dropping it from the ranking entirely is not the same
+            # thing. peak_gb is the one exception — 0.0 there means UNMEASURED
+            # (CPU run / no CUDA counter), which _fmt already renders as "—", and
+            # a dash must not win "peak VRAM" wearing the best-highlight.
             vals = [(k, s.get(skey)) for k, s in self._stats.items()
-                    if s.get(skey) is not None]
+                    if s.get(skey) is not None
+                    and not (skey == "peak_gb" and not s.get(skey))]
             if len(vals) < 2:
                 continue
             ranked = sorted(vals, key=lambda kv: kv[1], reverse=better > 0)
