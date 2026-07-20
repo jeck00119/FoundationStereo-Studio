@@ -67,9 +67,11 @@ scene.add(grid);
 // It ALSO does the in-box highlight on the GPU: each point tests itself against
 // the measure box (fed as uniforms) every frame, so highlight/heat-map/trim track
 // the gizmo live over millions of points at zero CPU cost.
+let pointPx=2.0;   // logical (CSS-px) point size — uSize bakes devicePixelRatio,
+                   // so the resize handler needs the raw value to re-bake it
 const pmat=new THREE.ShaderMaterial({
   uniforms:{
-    uSize:{value:2.0*devicePixelRatio},
+    uSize:{value:pointPx*devicePixelRatio},
     uBoxOn:{value:0.0},        // box highlight active (box visible AND a mode picked)
     uMode:{value:0.0},         // 1 highlight · 2 height map · 3 trim
     uIsolate:{value:0.0},      // hide outside points (vs dim them)
@@ -176,6 +178,9 @@ function frameCamera(){
   controls.target.set(c[0],c[1],c[2]);
   camera.position.set(c[0], c[1], c[2]-d*0.9);
   camera.near=d*0.001; camera.far=d*20; camera.updateProjectionMatrix();
+  // keep the dolly inside the clip planes — beyond ~far the cloud visibly clips
+  // away, and closer than ~near it vanishes. Refreshed with them on every refit.
+  controls.minDistance=d*0.002; controls.maxDistance=d*15;
   controls.update();
 }
 let gridStep=0;
@@ -355,14 +360,21 @@ function liveMeasure(){
 }
 
 // ---- the API Python drives (window.api.*) ----
+let loadSeq=0;   // newest loadCloud call — stale fetch completions must lose
 window.api={
-  loadCloud(url, n, flags, reset){
+  loadCloud(url, n, flags, reset, seq){
     // A rapid re-push deletes the previous .bin; its fetch can 404. Reject on
     // !ok and bail on a short buffer so a superseded frame is ignored, not
     // sliced into a RangeError. buildPoints does NOT re-measure — the box
     // readout is owned by measure.py (setReadout) except during a live drag.
+    // The seq check makes it LAST-ISSUED-wins: two in-flight fetches otherwise
+    // resolved last-COMPLETION-wins, and on Windows the deletion defence can
+    // miss (removing a file the server still has open raises, is swallowed, and
+    // the superseded fetch succeeds late — replacing the newer cloud).
+    loadSeq=seq||0;
     const need=15*n+((flags&1?1:0)+(flags&2?1:0)+(flags&4?1:0))*n;
     fetch(url).then(r=>r.ok?r.arrayBuffer():Promise.reject(r.status)).then(buf=>{
+      if((seq||0)!==loadSeq) return;   // a newer cloud was pushed while this fetched
       if(buf.byteLength<need) return;
       N=n;
       rawPos=new Float32Array(buf,0,3*n);
@@ -373,14 +385,17 @@ window.api={
       rawModel=(flags&4)?new Uint8Array(buf,off,n):null; if(flags&4)off+=n;
       buildPoints(!!reset);
       if(hiMode===2) refreshRange();   // re-fit the height ramp to the new cloud
-    }).catch(()=>{});   // a stale fetch for a cloud already replaced — ignore
+    }).catch(e=>{ if(e!==404) console.error('loadCloud failed:', e); });
+    // 404 = a stale fetch for a cloud already replaced (expected, ignore); anything
+    // else is a REAL failure in the load/build chain — surface it in the console
+    // instead of presenting as "nothing appeared" with no trace.
   },
   clearCloud(){ if(points){ scene.remove(points); points.geometry.dispose(); points=null; }
     rawPos=null; N=0; readout.style.display='none'; },
   setColorMode(m){ colorMode=m; recolor(); },
   setModelHidden(idx, on){ if(on)hidden.add(idx); else hidden.delete(idx); applyVisibility(); },
   clearHidden(){ hidden.clear(); applyVisibility(); },
-  setPointSize(s){ pmat.uniforms.uSize.value=s*devicePixelRatio; },
+  setPointSize(s){ pointPx=s; pmat.uniforms.uSize.value=s*devicePixelRatio; },
   setUnit(u, dec){ liveUnit=u; liveDec=dec; },
   // draw the whole set of boxes; `selected` is the one the gizmo edits (or -1)
   setBoxes(arr, selected, editable){
@@ -436,7 +451,13 @@ window.api={
 };
 
 addEventListener('resize', ()=>{ camera.aspect=innerWidth/innerHeight;
-  camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); });
+  camera.updateProjectionMatrix();
+  // re-read devicePixelRatio: moving the window to a monitor with a different
+  // Windows scale factor fires a resize, and the ratio (plus the point size that
+  // bakes it) would otherwise stay stale — blurry or wrongly-sized points
+  renderer.setPixelRatio(devicePixelRatio);
+  pmat.uniforms.uSize.value=pointPx*devicePixelRatio;
+  renderer.setSize(innerWidth,innerHeight); });
 
 // --- point-under-cursor probe: coords (+ depth = z in the camera frame) of the
 // nearest visible point, in a small card that follows the pointer. The O(N) pick is

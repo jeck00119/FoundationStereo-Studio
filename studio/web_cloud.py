@@ -305,7 +305,10 @@ class WebCloudView(QWidget):
             self.legend.set_models(self._model_names)
             self._js("api.clearHidden()")
 
-        self._js(f"api.loadCloud('{name}', {n}, {flags}, {1 if reset_view else 0})")
+        # seq rides along so the page can drop a SUPERSEDED fetch that completes
+        # late (two in-flight fetches otherwise resolved last-completion-wins)
+        self._js(f"api.loadCloud('{name}', {n}, {flags}, "
+                 f"{1 if reset_view else 0}, {self._cloud_seq})")
         self._update_cloud_lbl()
 
     def clear(self) -> None:

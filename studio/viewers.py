@@ -173,13 +173,23 @@ class ImageView2D(QWidget):
             self.pixelClicked.emit(px[0], px[1])
 
     # ------------------------------------------------------------- data in
+    def _set_rgb(self, arr: np.ndarray) -> None:
+        """Show an RGB image at FIXED 0–255 levels for uint8. Bare setImage()
+        auto-levels to each array's own min/max, so the two sides of a blink pair
+        got different contrast stretches — a global brightness step in the blink
+        that is not in the data."""
+        if arr.dtype == np.uint8:
+            self.img.setImage(arr, levels=(0, 255))
+        else:
+            self.img.setImage(arr)
+
     def set_image(self, arr: np.ndarray) -> None:
         self._arr = arr
         if self._scalar:
             self.img.setImage(arr.astype(np.float32), autoLevels=False)
             self._auto_levels()
         else:
-            self.img.setImage(arr)  # RGB uint8
+            self._set_rgb(arr)  # RGB uint8
         self.vb.autoRange(padding=0.02)
 
     def set_image_blink(self, arr: np.ndarray) -> None:
@@ -202,7 +212,7 @@ class ImageView2D(QWidget):
                 self._levels = lv
                 self.img.setLevels(list(lv))
         else:
-            self.img.setImage(arr)
+            self._set_rgb(arr)
         self.vb.setRange(xRange=rng[0], yRange=rng[1], padding=0)
 
     def clear(self) -> None:
@@ -253,7 +263,7 @@ class ImageView2D(QWidget):
         rng = self.vb.viewRange()     # capture current zoom/pan
         self._side = side
         self._arr = arr
-        self.img.setImage(arr)
+        self._set_rgb(arr)            # fixed levels — no per-side contrast stretch
         self.vb.setRange(xRange=rng[0], yRange=rng[1], padding=0)  # restore exactly (blink)
         self._update_side_lbl()
 
@@ -310,10 +320,16 @@ class ImageView2D(QWidget):
         a = self._arr.astype(np.float32)
         lo, hi = self._levels
         lut = build_lut(self.cmap.currentText())
+        invalid = ~(np.isfinite(a) & (a > 0))
+        # Mask NaN BEFORE the index cast: np.clip passes NaN through unchanged and
+        # astype(intp) turns it into a huge negative index → IndexError. A model can
+        # emit NaN disparity (e.g. mixed-precision overflow); the live view tolerates
+        # it, so export must too — those pixels go black like every invalid one.
+        a = np.where(invalid, lo, a)
         # match pyqtgraph makeARGB: idx = clip(floor((v-lo)*256/(hi-lo)), 0, 255)
         idx = np.clip((a - lo) * (256.0 / max(hi - lo, 1e-6)), 0, 255).astype(np.intp)
         rgb = lut[idx]
-        rgb[~(np.isfinite(a) & (a > 0))] = 0
+        rgb[invalid] = 0
         return np.ascontiguousarray(rgb).astype(np.uint8)
 
     # ------------------------------------------------------------- hover
