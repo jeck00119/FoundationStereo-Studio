@@ -26,12 +26,12 @@ import threading
 import weakref
 
 import numpy as np
-from PySide6.QtCore import QObject, Qt, QUrl, Signal, Slot
+from PySide6.QtCore import QObject, QUrl, Signal, Slot
 from PySide6.QtGui import QColor
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout, QLabel,
-                               QPushButton, QSlider, QVBoxLayout, QWidget)
+                               QPushButton, QVBoxLayout, QWidget)
 
 from .dtypes import UNIT_DECIMALS
 from .measure import MeasureBox
@@ -222,21 +222,12 @@ class WebCloudView(QWidget):
         # Fit view — the recovery move for a lost camera. The 2D tabs have a Fit
         # button; the 3D view had NONE (only a new Run reframed it), so dollying
         # away meant staying lost. Mirrors the in-view F shortcut.
+        # (Point size stays in the right panel's Point-cloud section, where the
+        # user expects it — the labeled slider there beats a bare one here.)
         self.fit_btn = QPushButton("⌂ Fit")
         self.fit_btn.setFixedWidth(52)
         self.fit_btn.setToolTip("Frame the camera on the whole cloud (or press F in the view).")
         self.fit_btn.clicked.connect(lambda: self._js("api.resetView()"))
-
-        # Point size lives HERE, on the view it affects — it sat in the right
-        # panel's calibration-gated "Point cloud" section, though it is a pure
-        # view setting (and file clouds without calibration still need it).
-        self.size_slider = no_wheel(QSlider(Qt.Horizontal))
-        self.size_slider.setRange(2, 12)                 # ×0.5 → 1.0–6.0 px
-        self.size_slider.setValue(4)                     # 2.0 px — the shader default
-        self.size_slider.setFixedWidth(80)
-        self.size_slider.setToolTip("On-screen size of each point. Cosmetic only — "
-                                    "it doesn't change the data.")
-        self.size_slider.valueChanged.connect(lambda v: self.set_point_size(v / 2.0))
 
         self.cloud_lbl = QLabel("")
         self.cloud_lbl.setProperty("role", "muted")
@@ -260,7 +251,6 @@ class WebCloudView(QWidget):
         self._inbox_group.setVisible(False)   # no editable box yet
         flow.addWidget(self._color_group)
         flow.addWidget(self._inbox_group)
-        flow.addWidget(_ctl_group(QLabel("Points"), self.size_slider))
         flow.addWidget(self.fit_btn)
         flow.addWidget(self.cloud_lbl)
 

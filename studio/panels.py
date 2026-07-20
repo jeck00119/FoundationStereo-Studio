@@ -882,6 +882,7 @@ class InputPanel(QWidget):
 class ParamPanel(QWidget):
     cloudParamsChanged = Signal()
     inferenceParamsChanged = Signal()   # a 'needs run' setting changed
+    pointSizeChanged = Signal(float)
     measureChanged = Signal()           # the measure box moved / resized / toggled
     boxesChanged = Signal()             # a box was added/removed — window redraws + measures + persists
     boxSelectionChanged = Signal()      # a different box became the active one
@@ -975,8 +976,9 @@ class ParamPanel(QWidget):
         _ds.addWidget(self.denoise_std)
         _ds.addWidget(self.denoise_nb)
         self.sec_cloud.add(self._denoise_sub)
-        # (point size moved to the 3D Cloud tab's own strip — it's a VIEW setting,
-        # and this section gates on calibration, which file clouds don't need)
+        self.point_size = StatSlider("Point size", 1, 6, 2, 0.5, "{:.1f}",
+            tip="On-screen size of each point in the 3D view. Cosmetic only — doesn't change the data.")
+        self.sec_cloud.add(self.point_size)
 
         # --- measure --- (foldable category)
         self.sec_measure = CollapsibleSection("Measure", "Live", "live")
@@ -1212,6 +1214,7 @@ class ParamPanel(QWidget):
             t.toggled.connect(lambda *_: self.cloudParamsChanged.emit())
         self.denoise.toggled.connect(self._denoise_sub.setVisible)   # fold sub-knobs when off
         self._denoise_sub.setVisible(self.denoise.isChecked())
+        self.point_size.valueChanged.connect(self.pointSizeChanged)
 
         # 'needs run' params — changing these makes the shown result stale
         # (per-model dynamic widgets are wired in set_backend)
