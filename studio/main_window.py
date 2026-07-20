@@ -223,7 +223,6 @@ class MainWindow(QMainWindow):
         self.input_panel.checkpointChanged.connect(self._on_checkpoint_changed)
         self.param_panel.cloudParamsChanged.connect(self._schedule_rebuild)
         self.param_panel.inferenceParamsChanged.connect(self._mark_stale)
-        self.param_panel.pointSizeChanged.connect(self.viewer.cloud_view.set_point_size)
         self.param_panel.measureChanged.connect(self._apply_measure)
         self.param_panel.boxesChanged.connect(self._apply_measure)
         self.param_panel.boxSelectionChanged.connect(self._apply_measure)

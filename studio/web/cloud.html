@@ -32,7 +32,7 @@
   <button id="bS">Scale</button>
   <button id="bReset" title="Set the box back to axis-aligned">Reset&nbsp;rot</button>
 </div>
-<div id="hint">drag empty space to orbit · scroll to zoom<br>W move · E rotate · R scale</div>
+<div id="hint"></div>
 <script type="importmap">
 { "imports": { "three": "./vendor/three.module.js", "three/addons/": "./vendor/" } }
 </script>
@@ -303,6 +303,15 @@ function selectLocal(idx){ selBox=idx;
 const readout=document.getElementById('readout'), bar=document.getElementById('bar');
 const bT=document.getElementById('bT'), bR=document.getElementById('bR'),
       bS=document.getElementById('bS'), bReset=document.getElementById('bReset');
+const hint=document.getElementById('hint');
+// the corner hint tells you what works RIGHT NOW — a static "W move · E rotate"
+// with no box on screen advertised keys that did nothing
+function syncHint(){
+  hint.innerHTML = 'drag to orbit · scroll to zoom · F fit view'
+    + (tc.enabled ? '<br>W move · E rotate · R scale · click a box to select it'
+                  : '<br>hover a point for its coordinates');
+}
+syncHint();
 function setMode(m){ tc.setMode(m);
   tc.setSpace(m==='translate'?'world':'local');   // move in world, rotate/scale local
   bT.classList.toggle('on',m==='translate');
@@ -310,8 +319,11 @@ function setMode(m){ tc.setMode(m);
   bS.classList.toggle('on',m==='scale'); }
 bT.onclick=()=>setMode('translate'); bR.onclick=()=>setMode('rotate'); bS.onclick=()=>setMode('scale');
 bReset.onclick=()=>{ const m=selMesh(); if(!m)return; m.quaternion.set(0,0,0,1); liveMeasure(); sendBox(true); };
-addEventListener('keydown', e=>{ if(!tc.enabled) return;
-  if(e.key==='w')setMode('translate'); if(e.key==='e')setMode('rotate'); if(e.key==='r')setMode('scale'); });
+addEventListener('keydown', e=>{
+  const k=e.key.toLowerCase();          // Shift/CapsLock must not kill the shortcuts
+  if(k==='f' && rawPos){ frameCamera(); return; }
+  if(!tc.enabled) return;
+  if(k==='w')setMode('translate'); if(k==='e')setMode('rotate'); if(k==='r')setMode('scale'); });
 
 function sendBox(final){
   if(!window._bridge) return; const m=selMesh(); if(!m) return;
@@ -426,8 +438,12 @@ window.api={
     if(editable && m){ tc.attach(m); tc.enabled=true; tc.visible=true; bar.style.display='flex'; }
     else { tc.detach(); tc.enabled=false; tc.visible=false; bar.style.display='none';
            if(!boxes.length) readout.style.display='none'; }
+    syncHint();                        // gizmo availability changed → keys hint changes
     if(hiMode===2) refreshRange();
   },
+  // frame the camera on the whole cloud — the recovery move for a lost view
+  // (also on the F key). Refits near/far and the orbit distance limits with it.
+  resetView(){ if(rawPos) frameCamera(); },
   setBoxMode(m){ setMode(m); },
   // in-box highlight: which visual (off/highlight/height/trim) + whether outside
   // points hide (isolate) or just dim
