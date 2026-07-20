@@ -361,6 +361,7 @@ function liveMeasure(){
 
 // ---- the API Python drives (window.api.*) ----
 let loadSeq=0;   // newest loadCloud call — stale fetch completions must lose
+let colorsSeq=0; // same idea for setColors
 window.api={
   loadCloud(url, n, flags, reset, seq){
     // A rapid re-push deletes the previous .bin; its fetch can 404. Reject on
@@ -389,6 +390,19 @@ window.api={
     // 404 = a stale fetch for a cloud already replaced (expected, ignore); anything
     // else is a REAL failure in the load/build chain — surface it in the console
     // instead of presenting as "nothing appeared" with no trace.
+  },
+  // recolor the CURRENT cloud in place: n×3 u8 bytes instead of the full n×15
+  // pack, no geometry rebuild, no grid/camera refit. The deviation heatmap's
+  // only change IS the colors, and it re-applies after every repaint — the full
+  // re-upload made each of those a multi-MB round trip done twice.
+  setColors(url, n, seq){
+    colorsSeq=seq||0;
+    fetch(url).then(r=>r.ok?r.arrayBuffer():Promise.reject(r.status)).then(buf=>{
+      if((seq||0)!==colorsSeq) return;   // a newer recolor superseded this one
+      if(n!==N || buf.byteLength<3*n) return;   // cloud changed under the fetch
+      rawCol=new Uint8Array(buf,0,3*n);
+      recolor();
+    }).catch(e=>{ if(e!==404) console.error('setColors failed:', e); });
   },
   clearCloud(){ if(points){ scene.remove(points); points.geometry.dispose(); points=null; }
     rawPos=null; N=0; readout.style.display='none'; },

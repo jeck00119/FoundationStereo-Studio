@@ -146,6 +146,8 @@ class WebCloudView(QWidget):
         self._queue: list = []
         self._cloud_seq = 0
         self._last_bin: str | None = None
+        self._colors_seq = 0                    # colors-only pushes (set_cloud_colors)
+        self._last_colors_bin: str | None = None
 
         # cloud metadata kept for the label + the model overlay
         self._n = 0
@@ -310,6 +312,26 @@ class WebCloudView(QWidget):
         self._js(f"api.loadCloud('{name}', {n}, {flags}, "
                  f"{1 if reset_view else 0}, {self._cloud_seq})")
         self._update_cloud_lbl()
+
+    def set_cloud_colors(self, colors) -> None:
+        """Recolor the CURRENT cloud in place — positions, camera, grid and boxes
+        all stay put. A fraction of set_cloud's cost (n×3 bytes vs n×15, no JS
+        geometry rebuild); used by the deviation heatmap, whose only change IS
+        the colors. Cloud bins are left alone: only the previous COLORS bin is
+        replaced, so an in-flight cloud fetch can't lose its file."""
+        if self._n == 0 or colors is None or len(colors) != self._n:
+            return
+        self._colors_seq += 1
+        name = f"colors_{self._colors_seq}.bin"
+        with open(os.path.join(self._root, name), "wb") as f:
+            f.write(np.ascontiguousarray(colors, "u1"))
+        if self._last_colors_bin:
+            try:
+                os.remove(os.path.join(self._root, self._last_colors_bin))
+            except OSError:
+                pass
+        self._last_colors_bin = name
+        self._js(f"api.setColors('{name}', {self._n}, {self._colors_seq})")
 
     def clear(self) -> None:
         self._js("api.clearCloud()")

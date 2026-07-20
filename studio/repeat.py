@@ -105,12 +105,25 @@ class RepeatabilityView(QWidget):
 
     def add_record(self, label: str, vals: dict) -> None:
         """Append one capture. ``vals`` maps pin name -> height in METRES (or None
-        where a box caught nothing)."""
+        where a box caught nothing).
+
+        Appends ONE row + recomputes the small summary instead of rebuilding both
+        tables: the full rebuild allocated O(N·pins) QTableWidgetItems per record,
+        so a long clouds batch (QTimer-paced, no inference to hide behind) went
+        quadratic and visibly stalled the GUI as the study grew. A record that
+        introduces a NEW pin still rebuilds fully (the column set changed)."""
+        rec = {"label": str(label), "vals": dict(vals)}
+        new_pin = any(n not in self._pins for n in vals)
         for n in vals:
             if n not in self._pins:
                 self._pins.append(n)
-        self._records.append({"label": str(label), "vals": dict(vals)})
-        self._refresh()
+        self._records.append(rec)
+        if new_pin:
+            self._refresh()
+            return
+        self._append_log_row(rec)
+        self._refresh_stats()
+        self._update_count()
 
     def clear(self) -> None:
         self._records = []
@@ -134,27 +147,27 @@ class RepeatabilityView(QWidget):
         v = [r["vals"].get(pin) for r in self._records]
         return np.array([x for x in v if x is not None], dtype=float)
 
-    def _refresh(self) -> None:
+    def _append_log_row(self, rec: dict) -> None:
+        """One new row at the bottom of the raw-readings table (columns unchanged)."""
+        u = self._unit
+        f = UNIT_PER_M[u]
+        dec = UNIT_DECIMALS.get(u, 2)
+        r = self.log_table.rowCount()
+        self.log_table.setRowCount(r + 1)
+        self.log_table.setItem(r, 0, QTableWidgetItem(rec["label"]))
+        for c, p in enumerate(self._pins):
+            h = rec["vals"].get(p)
+            self.log_table.setItem(
+                r, c + 1, _num("—" if h is None else f"{h * f:.{dec}f}"))
+        self.log_table.scrollToBottom()
+
+    def _refresh_stats(self) -> None:
+        """Rebuild the small per-pin summary (rows = pins — cheap, ≤ a few rows)."""
         u = self._unit
         f = UNIT_PER_M[u]
         dec = UNIT_DECIMALS.get(u, 2)
         sdec = dec + 1                      # σ / range are small — one extra digit
         pins = self._pins
-
-        # --- raw readings: rows = captures, cols = Capture + one per pin ---
-        self.log_table.setColumnCount(1 + len(pins))
-        self.log_table.setHorizontalHeaderLabels(
-            ["Capture"] + [f"{p} ({u})" for p in pins])
-        self.log_table.setRowCount(len(self._records))
-        for r, rec in enumerate(self._records):
-            self.log_table.setItem(r, 0, QTableWidgetItem(rec["label"]))
-            for c, p in enumerate(pins):
-                h = rec["vals"].get(p)
-                self.log_table.setItem(
-                    r, c + 1, _num("—" if h is None else f"{h * f:.{dec}f}"))
-        self.log_table.scrollToBottom()
-
-        # --- per-pin summary: rows = pins, cols = N/mean/σ/min/max/range ---
         self.stat_table.setHorizontalHeaderLabels(
             ["Pin", "N", f"mean ({u})", f"σ ({u})", f"min ({u})", f"max ({u})", f"range ({u})"])
         self.stat_table.setRowCount(len(pins))
@@ -176,9 +189,33 @@ class RepeatabilityView(QWidget):
         # size the summary to show every pin (up to 9) without its own scrollbar
         self.stat_table.setFixedHeight(34 + 30 * min(max(len(pins), 1), 9) + 4)
 
+    def _update_count(self) -> None:
         n = len(self._records)
         self.count_lbl.setText("no readings yet" if n == 0
                                else f"{n} reading{'s' if n != 1 else ''} logged")
+
+    def _refresh(self) -> None:
+        """Full rebuild — unit switch, Clear, or a record that adds a new pin column."""
+        u = self._unit
+        f = UNIT_PER_M[u]
+        dec = UNIT_DECIMALS.get(u, 2)
+        pins = self._pins
+
+        # --- raw readings: rows = captures, cols = Capture + one per pin ---
+        self.log_table.setColumnCount(1 + len(pins))
+        self.log_table.setHorizontalHeaderLabels(
+            ["Capture"] + [f"{p} ({u})" for p in pins])
+        self.log_table.setRowCount(len(self._records))
+        for r, rec in enumerate(self._records):
+            self.log_table.setItem(r, 0, QTableWidgetItem(rec["label"]))
+            for c, p in enumerate(pins):
+                h = rec["vals"].get(p)
+                self.log_table.setItem(
+                    r, c + 1, _num("—" if h is None else f"{h * f:.{dec}f}"))
+        self.log_table.scrollToBottom()
+
+        self._refresh_stats()
+        self._update_count()
 
     # ---------------------------------------------------------------- export
     def _export(self) -> None:

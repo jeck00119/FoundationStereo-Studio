@@ -981,12 +981,14 @@ class MainWindow(QMainWindow):
         cloud's colours, so every photo repaint (rebuild, level, unit, blink) wipes
         it; re-applying here keeps it live instead of silently reverting."""
         if self._overlay_on:
-            return   # set_cloud(self.cloud…) here would collapse the multi-model overlay
+            return   # recoloring here would tint the whole overlay by one model's plane
         if self._dev_on and self._has_points(self.cloud):
             n, c = self._board_plane()
             d, rng = deviation(self.cloud.points, n, c)
-            self.viewer.cloud_view.set_cloud(self.cloud.points, self._turbo(d, -rng, rng),
-                                             reset_view=False)
+            # colors-only push: the full set_cloud re-serialized the entire cloud
+            # (n×15 bytes + JS geometry rebuild) TWICE per repaint — once for the
+            # photo repaint, once more just to change these colors
+            self.viewer.cloud_view.set_cloud_colors(self._turbo(d, -rng, rng))
 
     def _on_point_picked(self, x: float, y: float, z: float) -> None:
         if not self._analyze_tool or not self._has_points(self.cloud):
@@ -1000,7 +1002,10 @@ class MainWindow(QMainWindow):
             self._compute_analyze()
 
     def _compute_analyze(self) -> None:
-        pts = np.asarray(self.cloud.points, np.float64)
+        # no up-front float64 copy of the whole cloud: point/distance never touch
+        # it (the copy was ~2× cloud memory per click for nothing), and profile/
+        # region convert internally
+        pts = self.cloud.points
         n, c = self._board_plane()
         u, dec = self._units, UNIT_DECIMALS.get(self._units, 2)
         off = self._z_off()                       # flat-reference correction (0 if none)
@@ -1140,12 +1145,14 @@ class MainWindow(QMainWindow):
         if on:
             n, c = self._board_plane()
             d, rng = deviation(self.cloud.points, n, c)
-            self.viewer.cloud_view.set_cloud(self.cloud.points, self._turbo(d, -rng, rng),
-                                             reset_view=False)
+            # colors-only: toggling the heatmap re-tints the cloud on screen —
+            # re-shipping every position for that was the single biggest
+            # avoidable transfer in the app (~60 MB at 4M points)
+            self.viewer.cloud_view.set_cloud_colors(self._turbo(d, -rng, rng))
             dec = UNIT_DECIMALS.get(self._units, 4)
             self._set_status(f"Deviation heatmap — ±{rng:.{dec}f} {self._units} about the board plane.")
         else:
-            self.viewer.cloud_view.set_cloud(self.cloud.points, self.cloud.colors, reset_view=False)
+            self.viewer.cloud_view.set_cloud_colors(self.cloud.colors)
 
     @staticmethod
     def _turbo(vals, lo, hi):
