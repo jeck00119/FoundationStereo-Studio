@@ -74,7 +74,9 @@ class MainWindow(QMainWindow):
         # batch reconstructs straight and pin heights read perpendicular to the board.
         self._level_R = None            # 3x3 rotation, or None (off)
         self._level_c_m = None          # rotation centre, canonical metres
-        self._cloud_raw_points = None   # the un-levelled points of the shown cloud
+        # (each cloud's un-levelled points ride on the CloudResult itself as
+        # .raw_points — a single window-level slot desynced from self.cloud on
+        # every blink/batch and spliced one cloud's points into another's colors)
         # --- analyze tools: pick points on the cloud to measure surface/pins ---
         self._analyze_tool = ""         # '' | profile | distance | region | point
         self._picked: list = []         # points clicked for the current measurement
@@ -363,10 +365,16 @@ class MainWindow(QMainWindow):
             # progress bar's range/value — don't let per-pair busy toggles fight it
             self._update_run_enabled()
             return
-        self.units_btn.setEnabled(not busy)   # no mm⇄m switch while a run is in flight
+        # `not _comparing` too: busy flickers FALSE between compare legs (cloudDone
+        # fires before the next leg re-raises busy), and a unit/model click landing
+        # in that gap corrupted the sweep — the frozen snapshot kept the old unit
+        # while results banked into new-unit caches, or a model change stranded the
+        # queue. The sweep ends re-enable these explicitly.
+        idle = not busy and not self._comparing
+        self.units_btn.setEnabled(idle)       # no mm⇄m switch while a run is in flight
         # no model/checkpoint switch mid-run — it would tear down the busy child
-        self.input_panel.model_combo.setEnabled(not busy)
-        self.input_panel.ckpt_combo.setEnabled(not busy)
+        self.input_panel.model_combo.setEnabled(idle)
+        self.input_panel.ckpt_combo.setEnabled(idle)
         self._update_run_enabled()
 
     def _on_model_loaded(self, device: str) -> None:
@@ -604,13 +612,24 @@ class MainWindow(QMainWindow):
         self.viewer.compare_view.set_running(False)
         for k in self.viewer.compare_view.cards:
             self.viewer.compare_view.set_status(k, "not run yet")
+        self._restore_scene_controls()
         self._update_run_enabled()
         self._set_status(reason)
+
+    def _restore_scene_controls(self) -> None:
+        """Re-enable the unit/model controls a compare sweep held disabled across
+        its busy gaps (see _on_busy — its `idle` test keeps them off mid-sweep, so
+        the sweep's two exits have to hand them back)."""
+        idle = not self._busy
+        self.units_btn.setEnabled(idle)
+        self.input_panel.model_combo.setEnabled(idle)
+        self.input_panel.ckpt_combo.setEnabled(idle)
 
     def _finish_compare(self) -> None:
         self._comparing = False
         self._compare_params_snapshot = None
         self.viewer.compare_view.set_running(False)
+        self._restore_scene_controls()
         models = [(k, get_spec(k).display_name.split("·")[0].strip(), get_spec(k).display_name)
                   for k in self.results]
         for bar in self._model_bars():
@@ -843,11 +862,20 @@ class MainWindow(QMainWindow):
         return f"capture {self.viewer.repeat_view.count() + 1}"
 
     # ------------------------------------------------------ level to plane
+    def _all_clouds(self) -> list:
+        """Every distinct CloudResult the session holds — the compare cache plus the
+        shown one (identity check, not ``in``: dataclass __eq__ compares arrays)."""
+        clouds = [c for c in self.clouds.values() if c is not None]
+        if self.cloud is not None and not any(c is self.cloud for c in clouds):
+            clouds.append(self.cloud)
+        return clouds
+
     def _ingest_level(self, cloud):
-        """Record the raw points and apply the active level rotation, so every cloud
-        (single run, compare, or batch) reconstructs in the levelled frame."""
+        """Record the raw points ON the cloud and apply the active level rotation, so
+        every cloud (single run, compare, or batch) reconstructs in the levelled
+        frame. With level off, raw_points is the same array as points (no copy)."""
         if self._has_points(cloud):
-            self._cloud_raw_points = cloud.points
+            cloud.raw_points = cloud.points
             if self._level_R is not None:
                 cloud.points = self._apply_level(cloud.points)
         return cloud
@@ -861,12 +889,21 @@ class MainWindow(QMainWindow):
         return (np.asarray(points) - c) @ self._level_R.T + c
 
     def _relevel_current(self) -> None:
-        """Re-show the current cloud from its raw points under the current level state."""
-        if self._cloud_raw_points is None or not self._has_points(self.cloud):
+        """Re-derive EVERY cached cloud from its own raw points under the current
+        level state, then re-show. All clouds, not just the shown one: the overlay
+        and the multi-target measure read the compare caches directly, so leaving
+        them in the old frame mixed levelled and unlevelled points in one readout."""
+        for c in self._all_clouds():
+            raw = getattr(c, "raw_points", None)
+            if raw is not None:
+                c.points = self._apply_level(raw)   # level off -> returns raw itself
+        if not self._has_points(self.cloud):
             return
-        self.cloud.points = self._apply_level(self._cloud_raw_points)
-        self.viewer.show_cloud(self.cloud, reset_view=True)
-        self._apply_measure()
+        if self._overlay_on:
+            self._show_overlay()        # re-stacks the re-levelled caches (+ measures)
+        else:
+            self.viewer.show_cloud(self.cloud, reset_view=True)
+            self._apply_measure()
         self._reset_analyze_overlay()   # picks were in the pre-level frame
         self._reapply_deviation()       # heatmap must reference the re-levelled plane
 
@@ -879,7 +916,7 @@ class MainWindow(QMainWindow):
         """Level button: fit the board plane, rotate the cloud (and the boxes) so the
         board is flat, and remember the rotation for every subsequent cloud."""
         if on:
-            raw = self._cloud_raw_points
+            raw = getattr(self.cloud, "raw_points", None) if self.cloud is not None else None
             if raw is None or len(raw) < 500:
                 self._set_status("No cloud to level yet — run a pair first.")
                 self.param_panel.set_level_checked(False)
@@ -943,6 +980,8 @@ class MainWindow(QMainWindow):
         """Re-paint the deviation heatmap after a cloud repaint. It's pushed as the
         cloud's colours, so every photo repaint (rebuild, level, unit, blink) wipes
         it; re-applying here keeps it live instead of silently reverting."""
+        if self._overlay_on:
+            return   # set_cloud(self.cloud…) here would collapse the multi-model overlay
         if self._dev_on and self._has_points(self.cloud):
             n, c = self._board_plane()
             d, rng = deviation(self.cloud.points, n, c)
@@ -1088,6 +1127,13 @@ class MainWindow(QMainWindow):
             self._compute_analyze()
 
     def _on_deviation(self, on: bool) -> None:
+        if on and self._overlay_on:
+            # the heatmap is one model's distance to ONE board plane — over a stack
+            # of different models' points it's meaningless, and pushing it would
+            # silently collapse the overlay to the single shown cloud
+            self.param_panel.set_deviation_checked(False)
+            self._set_status("Deviation heatmap shows a single model — untick Overlay first.")
+            return
         self._dev_on = bool(on)
         if not self._has_points(self.cloud):
             return
@@ -1554,6 +1600,18 @@ class MainWindow(QMainWindow):
             self._update_batch_progress()
             QTimer.singleShot(0, self._batch_next)
             return
+        if self._overlay_queue:
+            # An overlay rebuild leg failed. Without this the queue never popped, so
+            # the overlay wedged AND every later arriving cloud was mis-attributed to
+            # the queue head (the overlay branch of _on_cloud claims whatever lands).
+            # Drop the whole rebuild; the caches keep their previous clouds.
+            self._overlay_queue.clear()
+            if self._cloud_pending:        # a param edit was waiting on this rebuild
+                self._cloud_pending = False
+                self._cloud_timer.start()
+            self._set_status("Overlay rebuild failed — showing the previous clouds.")
+            QMessageBox.critical(self, "FoundationStereo Studio", msg)
+            return
         if self._comparing and self._compare_queue:
             # one model failing (e.g. it OOMs at this scale) must not abandon the
             # whole comparison — bank the reason, carry on, summarise at the end
@@ -1570,6 +1628,16 @@ class MainWindow(QMainWindow):
             self.viewer.compare_view.set_status(key, "failed — see the summary at the end")
             QTimer.singleShot(0, self._compare_next)
             return
+        if not self.worker.alive:
+            # The engine child is GONE (crash/OOM), not merely reporting an error:
+            # the next Run must LOAD again, not dispatch into a dead pipe. Without
+            # this, _model_ready stayed True so _needs_load() said False, and every
+            # Run raised "Lost connection" forever — recoverable only by switching
+            # to a different model or restarting the app. _model_ready=False makes
+            # Run read "Load & Run", and pressing it respawns a fresh child.
+            self._model_ready = False
+            self._sync_run_button()
+            self._update_run_enabled()
         self._set_status("Error — model not loaded." if not self._model_ready else "Error.")
         QMessageBox.critical(self, "FoundationStereo Studio", msg)
 
@@ -1648,7 +1716,7 @@ class MainWindow(QMainWindow):
         # False, and gating on it left Run dead with "Waiting for the engine…" while
         # nothing was coming. Now pressing Run simply retries the load.
         free = (self.input_panel.ready and not self._busy and not self._comparing
-                and not self._batching)
+                and not self._batching and not self._overlay_queue)
         self.run_btn.setEnabled(free and (self._model_ready or self._needs_load()))
         self._sync_run_button()   # every path that changes enabled-ness can change the LABEL
         self.viewer.compare_view.set_run_state(*self._compare_run_state(free))
@@ -1674,8 +1742,8 @@ class MainWindow(QMainWindow):
         return True, ""
 
     def _run(self) -> None:
-        if self._busy or self._comparing or self._batching:
-            return   # a run is already in flight — guards programmatic callers too
+        if self._busy or self._comparing or self._batching or self._overlay_queue:
+            return   # a run/overlay-rebuild is in flight — guards programmatic callers too
         if not self.input_panel.ready:
             QMessageBox.information(self, "Load a pair", "Load both left and right images first.")
             return
@@ -1782,6 +1850,11 @@ class MainWindow(QMainWindow):
         """Rebuild the overlay's clouds one at a time, then redraw it."""
         if not self._overlay_queue:
             self._show_overlay()
+            if self._cloud_pending:
+                # a cloud param was edited while the overlay rebuilt — without this
+                # the flag sat consumed-by-nobody and the edit never applied
+                self._cloud_pending = False
+                self._cloud_timer.start()
             return
         key = self._overlay_queue[0]
         r = self.results.get(key)
@@ -1795,9 +1868,12 @@ class MainWindow(QMainWindow):
     def _rebuild_cloud(self) -> None:
         if self.result is None or self.result.depth is None:
             return
-        if self._busy:
-            # a rebuild/inference is in flight — remember to run once with the
-            # latest params instead of queuing many
+        if self._busy or self._comparing or self._batching or self._overlay_queue:
+            # A rebuild/inference is in flight, or another state machine (compare
+            # leg, batch, overlay rebuild) owns the reply stream — remember to run
+            # ONCE with the latest params instead of queueing many. Dispatching here
+            # would land this rebuild's cloud in that machine's branch of _on_cloud
+            # and be banked as ITS next reply (wrong model / bogus batch capture).
             self._cloud_pending = True
             return
         self._cloud_pending = False
@@ -1830,7 +1906,7 @@ class MainWindow(QMainWindow):
         reuses the loaded model, the current calibration and the placed boxes, so
         all three have to be in place — which is exactly the state you're in right
         after running one pair and dropping a box on each pin."""
-        if self._busy or self._comparing:
+        if self._busy or self._comparing or self._overlay_queue:
             return False, "The engine is busy — wait for the current run to finish."
         if not self._model_ready or self._needs_load():
             return False, ("Load a model first: drop a representative pair and press "
@@ -1887,6 +1963,12 @@ class MainWindow(QMainWindow):
             if self._batch_dialog is not None:
                 self._batch_dialog.on_finished(f"Not started — {reason}")
             return
+        # The batch replaces the shown scene with its own captures — drop the shown
+        # result and the compare caches FIRST. Leaving them meant the first
+        # post-batch live rebuild wrote a batch pair's cloud/stats into the
+        # previously shown model's Compare column (cache poisoning), and blinking
+        # back showed the compare pair's disparity over a batch pair's 3D cloud.
+        self._clear_results()
         self._batching = True
         self._batch_kind = "pairs"
         self._batch_cancel = False
@@ -1897,12 +1979,17 @@ class MainWindow(QMainWindow):
         self._batch_params = self._current_params()        # scene frozen for the run
         self._batch_specs = self.param_panel.box_specs()   # boxes frozen for the run
         self._reset_cloud_view = True
-        # lock the scene — no image/model/box/unit change mid-study
+        # lock the scene — no image/model/box/unit change mid-study. The study's
+        # own buttons and Export lock too: Log would inject a mislabeled row,
+        # Clear would wipe the accumulating study, and an Export dialog would let
+        # the batch advance underneath its own snapshot.
         self.input_panel.setEnabled(False)
         self.param_panel.setEnabled(False)
         self.run_btn.setEnabled(False)
         self.compare_btn.setEnabled(False)
         self.units_btn.setEnabled(False)
+        self.export_btn.setEnabled(False)
+        self.viewer.repeat_view.set_locked(True)
         self.viewer.repeat_view.set_pins([n for n, _b, _t in self._batch_specs])
         self.viewer.setCurrentWidget(self.viewer.repeat_view)   # watch it fill
         self.progress.setRange(0, self._batch_total)
@@ -1984,6 +2071,9 @@ class MainWindow(QMainWindow):
             if self._batch_dialog is not None:
                 self._batch_dialog.on_finished("Not started — no measure boxes.")
             return
+        # same cache-poisoning defence as the pairs batch: the file clouds replace
+        # the scene, so the previous result/compare caches must not survive them
+        self._clear_results()
         self._batching = True
         self._batch_kind = "clouds"
         self._batch_cancel = False
@@ -2000,6 +2090,8 @@ class MainWindow(QMainWindow):
         self.run_btn.setEnabled(False)
         self.compare_btn.setEnabled(False)
         self.units_btn.setEnabled(False)
+        self.export_btn.setEnabled(False)
+        self.viewer.repeat_view.set_locked(True)
         self.viewer.repeat_view.set_pins([n for n, _b, _t in self._batch_specs])
         self.viewer.setCurrentWidget(self.viewer.repeat_view)
         self.progress.setRange(0, self._batch_total)
@@ -2067,6 +2159,8 @@ class MainWindow(QMainWindow):
         self.param_panel.setEnabled(True)
         self.compare_btn.setEnabled(True)
         self.units_btn.setEnabled(not self._busy)
+        self.export_btn.setEnabled(self.result is not None)
+        self.viewer.repeat_view.set_locked(False)
         self.progress.setRange(0, 0)      # back to the indeterminate busy spinner
         self.progress.setVisible(self._busy)
         self._update_run_enabled()
@@ -2160,8 +2254,8 @@ class MainWindow(QMainWindow):
     _UNIT_CYCLE = ("mm", "µm", "m")   # click order — mm→µm (small pins) →m→mm
 
     def _toggle_units(self) -> None:
-        if self._busy:
-            return   # never switch mid-run — the child's cached result is in flight
+        if self._busy or self._comparing or self._batching or self._overlay_queue:
+            return   # never switch mid-run/sweep — cached results are in flight
         order = self._UNIT_CYCLE
         i = order.index(self._units) if self._units in order else 0
         self._set_units(order[(i + 1) % len(order)])
@@ -2191,14 +2285,13 @@ class MainWindow(QMainWindow):
             if r.depth is not None:
                 r.depth = r.depth * factor
             r.baseline = float(r.baseline) * factor
-        clouds = list(self.clouds.values())
-        if self.cloud is not None and not any(c is self.cloud for c in clouds):
-            clouds.append(self.cloud)
-        for c in clouds:
-            if c is not None:
-                c.points = c.points * factor
-        if self._cloud_raw_points is not None:   # keep the un-levelled copy in the new unit
-            self._cloud_raw_points = self._cloud_raw_points * factor
+        for c in self._all_clouds():
+            # raw_points may BE the points array (level off) — rescale once and
+            # re-share, or the second multiply would double-scale the shared array
+            same = getattr(c, "raw_points", None) is c.points
+            c.points = c.points * factor
+            if getattr(c, "raw_points", None) is not None:
+                c.raw_points = c.points if same else c.raw_points * factor
         for s in self.mstats.values():           # the strip's numbers are unit-bearing too
             for k in ("med_depth", "plane_rms"):
                 if s.get(k) is not None:
@@ -2298,6 +2391,9 @@ class MainWindow(QMainWindow):
         self._vram_timer.stop()
         self._cloud_timer.stop()
         self._measure_timer.stop()
+        # flush the box set NOW: _remeasure (which persists it) is debounced 120 ms,
+        # so a box edit made just before closing would otherwise be lost
+        self._save_boxes()
         s = self.settings
         s.setValue("theme", self.theme)
         s.setValue("geometry", self.saveGeometry())

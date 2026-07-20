@@ -134,3 +134,8 @@ class CloudResult:
     n: int = 0
     origin: Optional[np.ndarray] = None    # (N,) uint8: 0=left eye, 1=right eye
     reliable: Optional[np.ndarray] = None  # (N,) bool: left-right consistent (not occluded)
+    # GUI-side only — the engine never sets this. MainWindow._ingest_level stores the
+    # un-levelled points HERE (not in a window-level slot) so that blinking between
+    # cached model clouds, or a multi-file clouds batch, can never pair one cloud's
+    # raw points with another cloud's colors when the level toggle re-derives points.
+    raw_points: Optional[np.ndarray] = None  # (N,3) float32, pre-level frame

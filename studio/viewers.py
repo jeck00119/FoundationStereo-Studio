@@ -397,7 +397,7 @@ class ViewerStack(QTabWidget):
         self.depth_view.set_unit(unit, UNIT_DECIMALS.get(unit, 2))
         self.cloud_view.set_units(unit)
         self.compare_view.set_units(unit, UNIT_DECIMALS.get(unit, 2))
-        self.repeat_view.set_units(unit, UNIT_DECIMALS.get(unit, 2))
+        self.repeat_view.set_units(unit)
         self._set_depth_tip(unit)
 
     def show_input(self, left: np.ndarray, right: np.ndarray | None = None) -> None:

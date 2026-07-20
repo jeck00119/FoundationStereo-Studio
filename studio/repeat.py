@@ -9,13 +9,12 @@ re-labels the table; export drops the raw rows + the per-pin summary to CSV.
 from __future__ import annotations
 
 import csv
-import os
 
 import numpy as np
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QHeaderView, QLabel,
-                               QPushButton, QTableWidget, QTableWidgetItem,
-                               QVBoxLayout, QWidget)
+                               QMessageBox, QPushButton, QTableWidget,
+                               QTableWidgetItem, QVBoxLayout, QWidget)
 
 from .dtypes import UNIT_DECIMALS
 from .engine import UNIT_PER_M
@@ -117,7 +116,15 @@ class RepeatabilityView(QWidget):
         self._records = []
         self._refresh()
 
-    def set_units(self, unit: str, dec: int | None = None) -> None:
+    def set_locked(self, locked: bool) -> None:
+        """Batch lock. A running batch feeds this table and parks the user on it,
+        so its buttons stay visible — but Log would inject a mislabeled extra row,
+        Clear would wipe the accumulating study, and Export would race the writer.
+        The window locks them for the batch's duration."""
+        for b in (self.log_btn, self.clear_btn, self.export_btn):
+            b.setEnabled(not locked)
+
+    def set_units(self, unit: str) -> None:
         if unit in UNIT_PER_M and unit != self._unit:
             self._unit = unit
             self._refresh()
@@ -184,26 +191,35 @@ class RepeatabilityView(QWidget):
         u = self._unit
         f = UNIT_PER_M[u]
         dec = UNIT_DECIMALS.get(u, 2)
+        sdec = dec + 1                      # match the on-screen table's σ/range digits
         try:
             with open(path, "w", newline="", encoding="utf-8") as fh:
                 w = csv.writer(fh)
-                w.writerow([f"capture ({u})"] + self._pins)
+                # unit on the pin columns (they hold the heights), not the label column
+                w.writerow(["capture"] + [f"{p} ({u})" for p in self._pins])
                 for rec in self._records:
                     w.writerow([rec["label"]] + [
                         "" if rec["vals"].get(p) is None else round(rec["vals"][p] * f, dec)
                         for p in self._pins])
                 w.writerow([])
-                w.writerow(["summary", "N", "mean", "sigma", "min", "max", "range"])
+                w.writerow(["summary", "N", f"mean ({u})", f"sigma ({u})",
+                            f"min ({u})", f"max ({u})", f"range ({u})"])
                 for p in self._pins:
                     a = self._vals_m(p) * f
                     if len(a):
                         n = len(a)
-                        sd = round(float(a.std(ddof=1)), dec + 2) if n > 1 else ""
-                        rng = round(float(a.max() - a.min()), dec + 1) if n > 1 else ""
-                        w.writerow([p, n, round(float(a.mean()), dec + 1),
+                        # same rounding as the table, so the CSV can't disagree with it
+                        sd = round(float(a.std(ddof=1)), sdec) if n > 1 else ""
+                        rng = round(float(a.max() - a.min()), sdec) if n > 1 else ""
+                        w.writerow([p, n, round(float(a.mean()), dec),
                                     sd, round(float(a.min()), dec),
                                     round(float(a.max()), dec), rng])
                     else:
                         w.writerow([p, 0, "", "", "", "", ""])
-        except OSError:
-            pass
+        except OSError as exc:
+            # PermissionError here is Windows daily life: the CSV is open in Excel.
+            # Swallowing it told the user the export worked when nothing was written.
+            QMessageBox.critical(
+                self, "Export failed",
+                f"Couldn't write {path}:\n{exc}\n\n"
+                "If the file is open in Excel, close it there and export again.")

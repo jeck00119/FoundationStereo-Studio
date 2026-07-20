@@ -1489,6 +1489,12 @@ class ParamPanel(QWidget):
         self.ref_btn.setChecked(bool(on))
         self.ref_btn.blockSignals(False)
 
+    def set_deviation_checked(self, on: bool) -> None:
+        """Sync the Deviation button without emitting (the window drives the heatmap)."""
+        self.dev_btn.blockSignals(True)
+        self.dev_btn.setChecked(bool(on))
+        self.dev_btn.blockSignals(False)
+
     def set_profile(self, t, h) -> None:
         if t is None or len(t) < 2:
             self._profile_curve.setData([], [])
