@@ -4,3 +4,11 @@ output/*
 weight/
 __pycache__
 DATA/*
+
+# --- local environment & outputs (studio app) ---
+.venv/
+test_outputs/
+.cache/
+data/
+studio/_spike_web/
+*.log

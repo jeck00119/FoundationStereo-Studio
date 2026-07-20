@@ -1,0 +1,512 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html,body{margin:0;height:100%;background:#0a0c12;overflow:hidden;
+    font-family:"Cascadia Mono",Consolas,monospace;color:#e7ecf4}
+  #c{position:fixed;inset:0;display:block}
+  #readout{position:fixed;left:14px;top:12px;background:rgba(10,12,18,.82);
+    padding:8px 11px;border-radius:8px;font-size:12px;line-height:1.5;white-space:pre;
+    pointer-events:none;border:1px solid rgba(245,217,92,.22);display:none}
+  /* point-under-cursor probe — follows the pointer, shows the nearest point's coords */
+  #hoverInfo{position:fixed;background:rgba(10,12,18,.9);
+    padding:6px 9px;border-radius:7px;font-size:12px;line-height:1.5;white-space:pre;
+    pointer-events:none;border:1px solid rgba(255,106,61,.45);display:none;z-index:6}
+  #hoverInfo .k{color:#8394ab}
+  #bar{position:fixed;left:14px;bottom:14px;display:none;gap:7px}
+  #bar button{background:#161b26;color:#cdd6e4;border:1px solid #2a3342;border-radius:7px;
+    padding:6px 12px;font:inherit;font-size:12px;cursor:pointer}
+  #bar button.on{background:#f5d95c;color:#1a1a1a;border-color:#f5d95c;font-weight:600}
+  #hint{position:fixed;right:14px;bottom:12px;font-size:11px;color:#8394ab;
+    text-align:right;pointer-events:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="readout"></div>
+<div id="hoverInfo"></div>
+<div id="bar">
+  <button id="bT" class="on">Move</button>
+  <button id="bR">Rotate</button>
+  <button id="bS">Scale</button>
+  <button id="bReset" title="Set the box back to axis-aligned">Reset&nbsp;rot</button>
+</div>
+<div id="hint">drag empty space to orbit · scroll to zoom<br>W move · E rotate · R scale</div>
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.js", "three/addons/": "./vendor/" } }
+</script>
+<script src="qwebchannel.js"></script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/OrbitControls.js';
+import { TransformControls } from 'three/addons/TransformControls.js';
+
+// palette — kept identical to studio/viewers.py so the web view and the rest of
+// the app colour points the same way
+const LEFT=[74,144,226], RIGHT=[245,145,60], OKC=[70,200,130], BAD=[235,80,100];
+const MODEL=[[74,144,226],[245,145,60],[70,200,130],[200,120,235],[235,200,70]];
+
+const canvas=document.getElementById('c');
+const renderer=new THREE.WebGLRenderer({canvas, antialias:true});
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x0a0c12);
+const camera=new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.001, 1e6);
+camera.up.set(0,-1,0);                              // world Y is image-down
+const controls=new OrbitControls(camera, renderer.domElement);
+controls.enableDamping=true; controls.dampingFactor=0.12;
+
+let grid=new THREE.GridHelper(1,10,0x2a3342,0x1b2230);
+grid.rotation.x=Math.PI/2;                          // GridHelper is XZ; lay it on XY
+scene.add(grid);
+
+// ---- points: a tiny shader so per-point colour (colour modes), per-point
+// visibility (model show/hide) and a pixel point size all live in one draw ----
+// It ALSO does the in-box highlight on the GPU: each point tests itself against
+// the measure box (fed as uniforms) every frame, so highlight/heat-map/trim track
+// the gizmo live over millions of points at zero CPU cost.
+const pmat=new THREE.ShaderMaterial({
+  uniforms:{
+    uSize:{value:2.0*devicePixelRatio},
+    uBoxOn:{value:0.0},        // box highlight active (box visible AND a mode picked)
+    uMode:{value:0.0},         // 1 highlight · 2 height map · 3 trim
+    uIsolate:{value:0.0},      // hide outside points (vs dim them)
+    uBoxCenter:{value:new THREE.Vector3()},
+    uBoxHalf:{value:new THREE.Vector3(1,1,1)},
+    uBoxRotT:{value:new THREE.Matrix3()},          // Rᵀ: uBoxRotT·(p−c) = box-local coords
+    uHRange:{value:new THREE.Vector2(0,1)},        // [min,max] local-z for the height ramp
+    uTrim:{value:new THREE.Vector2(-1e30,1e30)},   // trimmed height band (kept between)
+  },
+  vertexShader:`
+    attribute vec3 color; attribute float shown; varying vec3 vColor;
+    uniform float uSize, uBoxOn, uMode, uIsolate;
+    uniform vec3 uBoxCenter, uBoxHalf; uniform mat3 uBoxRotT;
+    uniform vec2 uHRange, uTrim;
+    vec3 turbo(float x){ x=clamp(x,0.0,1.0);          // Google Turbo, polynomial fit
+      vec4 v4=vec4(1.0,x,x*x,x*x*x); vec2 v2=v4.zw*v4.z;
+      return clamp(vec3(
+        dot(v4,vec4(0.13572138,4.61539260,-42.66032258,132.13108234))+dot(v2,vec2(-152.94239396,59.28637943)),
+        dot(v4,vec4(0.09140261,2.19418839,4.84296658,-14.18503333))+dot(v2,vec2(4.27729857,2.82956604)),
+        dot(v4,vec4(0.10667330,12.64194608,-60.58204836,110.36276771))+dot(v2,vec2(-89.90310912,27.34824973))
+      ),0.0,1.0); }
+    void main(){
+      vec3 base=color; float sz=uSize; float vis=shown;
+      if(uBoxOn>0.5){
+        vec3 local=uBoxRotT*(position-uBoxCenter);
+        if(all(lessThanEqual(abs(local),uBoxHalf))){       // inside the box
+          if(uMode>2.5){ base = (local.z<uTrim.x||local.z>uTrim.y)
+                                ? vec3(0.95,0.28,0.22) : vec3(0.30,0.85,0.42); sz=uSize+1.5; } // trim
+          else if(uMode>1.5){ float t=(local.z-uHRange.x)/max(uHRange.y-uHRange.x,1e-6);
+                              base=turbo(1.0-t); sz=uSize+1.5; }                    // height: red=tip, blue=base
+          else if(uMode>0.5){ base=min(base*1.15+0.06,vec3(1.0)); sz=uSize+1.5; }              // highlight
+          // uMode==0 → isolate-only: leave the inside points exactly as they are
+        } else if(uIsolate>0.5){ vis=0.0; }                // outside + isolate: hide
+        else { base=base*0.25; }                           // outside: dim
+      }
+      vColor=base;
+      // hidden points (model-hidden OR isolate-culled): push out of the clip cube
+      // AND zero the size — some GPUs clamp gl_PointSize up to 1px, so size alone
+      // would leave stray full-colour dots (looks like it only "dimmed").
+      gl_Position = vis>0.5 ? projectionMatrix*modelViewMatrix*vec4(position,1.0)
+                            : vec4(2.0,2.0,2.0,1.0);
+      gl_PointSize = vis>0.5 ? sz : 0.0; }`,
+  fragmentShader:`varying vec3 vColor; void main(){ gl_FragColor=vec4(vColor,1.0); }`,
+});
+let points=null, N=0;
+let rawPos=null, rawCol=null, rawOri=null, rawRel=null, rawModel=null;
+let colorAttr=null, shownAttr=null;
+let colorMode='photo';
+let hiMode=0, hiIsolate=false;                     // in-box highlight state
+const hidden=new Set();
+// hover-probe / point-pick state (declared here so buildPoints can invalidate it)
+let _hoverXY=null, _hoverT=0, _hoverIdx=-1, _repick=true, _hoverPX=-1, _hoverPY=-1;
+const _pickTmp=new THREE.Vector3();
+
+function buildPoints(reset){
+  if(points){ scene.remove(points); points.geometry.dispose(); }
+  const g=new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(rawPos,3));
+  colorAttr=new THREE.BufferAttribute(new Float32Array(3*N),3);
+  shownAttr=new THREE.BufferAttribute(new Float32Array(N).fill(1),1);
+  g.setAttribute('color', colorAttr);
+  g.setAttribute('shown', shownAttr);
+  points=new THREE.Points(g, pmat);
+  points.frustumCulled=false;                       // bbox is fine; avoids surprises
+  scene.add(points);
+  recolor(); applyVisibility();
+  fitGrid();
+  if(reset) frameCamera();
+  _hoverIdx=-1; _repick=true;   // a new/replaced cloud invalidates the last hover pick
+}
+
+function recolor(){
+  if(!colorAttr) return;
+  const a=colorAttr.array;
+  for(let i=0;i<N;i++){
+    let c;
+    if(colorMode==='model' && rawModel){ c=MODEL[rawModel[i]%MODEL.length]; }
+    else if(colorMode==='camera' && rawOri){ c = rawOri[i]===0?LEFT:RIGHT; }
+    else if(colorMode==='reliability' && rawRel){ c = rawRel[i]?OKC:BAD; }
+    else { const j=3*i; a[3*i]=rawCol[j]/255; a[3*i+1]=rawCol[j+1]/255; a[3*i+2]=rawCol[j+2]/255; continue; }
+    a[3*i]=c[0]/255; a[3*i+1]=c[1]/255; a[3*i+2]=c[2]/255;
+  }
+  colorAttr.needsUpdate=true;
+}
+
+function applyVisibility(){
+  if(!shownAttr) return;
+  const s=shownAttr.array;
+  if(rawModel && hidden.size){ for(let i=0;i<N;i++) s[i]=hidden.has(rawModel[i])?0:1; }
+  else { s.fill(1); }
+  shownAttr.needsUpdate=true;
+}
+
+function bbox(){
+  const mn=[1e30,1e30,1e30], mx=[-1e30,-1e30,-1e30];
+  for(let i=0;i<rawPos.length;i+=3) for(let k=0;k<3;k++){
+    const v=rawPos[i+k]; if(v<mn[k])mn[k]=v; if(v>mx[k])mx[k]=v; }
+  return {mn,mx};
+}
+function frameCamera(){
+  const {mn,mx}=bbox();
+  const c=[(mn[0]+mx[0])/2,(mn[1]+mx[1])/2,(mn[2]+mx[2])/2];
+  const d=Math.hypot(mx[0]-mn[0],mx[1]-mn[1],mx[2]-mn[2])||1;
+  controls.target.set(c[0],c[1],c[2]);
+  camera.position.set(c[0], c[1], c[2]-d*0.9);
+  camera.near=d*0.001; camera.far=d*20; camera.updateProjectionMatrix();
+  controls.update();
+}
+let gridStep=0;
+function fitGrid(){
+  const {mn,mx}=bbox();
+  const span=Math.max(mx[0]-mn[0],mx[1]-mn[1],mx[2]-mn[2])||1;
+  const raw=span/8, mag=Math.pow(10,Math.floor(Math.log10(raw)));
+  gridStep=[1,2,5,10].map(m=>m*mag).reduce((a,b)=>Math.abs(b-raw)<Math.abs(a-raw)?b:a);
+  const nc=Math.max(2,Math.ceil(span/gridStep)+2);
+  scene.remove(grid); grid.geometry.dispose(); grid.material.dispose();
+  grid=new THREE.GridHelper(gridStep*nc, nc, 0x2a3342, 0x161d29);
+  grid.rotation.x=Math.PI/2;
+  grid.position.set((mn[0]+mx[0])/2,(mn[1]+mx[1])/2, mx[2]);   // behind the board
+  scene.add(grid);
+}
+
+// ---- measure boxes: multiple, drawn at once; one selected carries the gizmo ----
+const boxGeo=new THREE.BoxGeometry(1,1,1);
+const edgeGeo=new THREE.EdgesGeometry(boxGeo);
+// per-box colours (cycled); index 0 keeps the old yellow
+const BOX_RGB=[0xf5d95c,0x5ac8fa,0x6ee7a0,0xc887f0,0xff8f5a,0xff6b8a,0x8ad0ff,0xffd24a];
+let boxes=[];          // one THREE.Mesh per box (wireframe as a child)
+let selBox=-1;         // the index the gizmo edits (highlight + live readout follow it)
+let boxEditable=false;
+function makeBoxMesh(){
+  const m=new THREE.Mesh(boxGeo, new THREE.MeshBasicMaterial(
+    {transparent:true, opacity:0.06, depthWrite:false}));
+  const wire=new THREE.LineSegments(edgeGeo, new THREE.LineBasicMaterial({transparent:true}));
+  m.add(wire); m.userData.wire=wire; scene.add(m);
+  return m;
+}
+function disposeBoxMesh(m){ scene.remove(m); m.material.dispose(); m.userData.wire.material.dispose(); }
+function styleBox(m,i,on){ const c=BOX_RGB[i%BOX_RGB.length];
+  m.material.color.setHex(c); m.material.opacity=on?0.12:0.05;
+  const w=m.userData.wire.material; w.color.setHex(c); w.opacity=on?1.0:0.42; }
+function selMesh(){ return (selBox>=0 && selBox<boxes.length)?boxes[selBox]:null; }
+
+const tc=new TransformControls(camera, renderer.domElement);
+tc.setSpace('local'); tc.enabled=false; tc.visible=false;
+scene.add(tc);
+tc.addEventListener('dragging-changed', e=>{ controls.enabled=!e.value; _dragging=e.value;
+  if(!e.value) sendBox(true); });               // final value when the drag ends
+// objectChange fires many times per drag frame; coalesce the (per-point) live
+// readout and the box->Python push to at most once per animation frame. The live
+// readout belongs to the drag ONLY — at rest the authoritative line from
+// measure.py stands, so a frame that lands after release is dropped rather than
+// overwriting it.
+let _livePending=false, _dragging=false;
+function scheduleLive(){ if(_livePending) return; _livePending=true;
+  requestAnimationFrame(()=>{ _livePending=false; if(!_dragging) return;
+    liveMeasure(); sendBox(false); }); }
+tc.addEventListener('objectChange', scheduleLive);
+
+// click a box (a click — not an orbit-drag or a gizmo op) to select it; or, in
+// analyze mode, pick the nearest cloud point under the cursor and send it to Python
+const raycaster=new THREE.Raycaster(); let _downXY=null;
+let analyzeMode=null;                              // null | 'profile' | 'distance' | 'region' | 'point'
+const analyzeGroup=new THREE.Group(); scene.add(analyzeGroup);
+let analyzeMarkers=[];                              // pick spheres — kept a constant px size
+function clearAnalyzeGroup(){ analyzeMarkers=[]; while(analyzeGroup.children.length){ const o=analyzeGroup.children.pop();
+  if(o.geometry)o.geometry.dispose(); if(o.material)o.material.dispose(); } }
+// scale a unit-radius mesh so it spans ~diaPx CSS px on screen at any zoom (world height
+// at distance d is 2·d·tan(fov/2), so on-screen px = K/2 ⇒ pass the wanted diameter as K)
+function scaleToPx(mesh, diaPx){
+  const dist=camera.position.distanceTo(mesh.position);
+  mesh.scale.setScalar(Math.max(diaPx*dist*Math.tan(camera.fov*Math.PI/360)/innerHeight, 1e-9));
+}
+function pickIndex(cx, cy, rad2){   // FRONT-most VISIBLE point within sqrt(rad2)px of (cx,cy)
+  if(!rawPos) return -1;            // screen-space + NDC depth, so it can't grab a hidden background pt
+  const r=renderer.domElement.getBoundingClientRect();
+  camera.updateMatrixWorld();
+  const el=new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix,
+             new THREE.Matrix4().copy(camera.matrixWorld).invert()).elements;
+  // Isolate culling is a pure SHADER effect (uIsolate) that shownAttr never records,
+  // so replicate its box-OBB test here — otherwise the pick grabs points that Isolate
+  // has hidden (a marker floating on nothing, or a wrong analyze coord sent to Python).
+  const iso = pmat.uniforms.uBoxOn.value>0.5 && pmat.uniforms.uIsolate.value>0.5;
+  const bc=pmat.uniforms.uBoxCenter.value, bh=pmat.uniforms.uBoxHalf.value,
+        brt=pmat.uniforms.uBoxRotT.value;
+  let best=-1, bestZ=1e18;
+  for(let i=0;i<rawPos.length;i+=3){
+    if(shownAttr && shownAttr.array[i/3]<0.5) continue;              // skip model-hidden
+    const x=rawPos[i],y=rawPos[i+1],z=rawPos[i+2];
+    if(iso){ _pickTmp.set(x,y,z).sub(bc).applyMatrix3(brt);          // box-local coords (== shader)
+      if(Math.abs(_pickTmp.x)>bh.x||Math.abs(_pickTmp.y)>bh.y||Math.abs(_pickTmp.z)>bh.z) continue; }
+    const cw=el[3]*x+el[7]*y+el[11]*z+el[15]; if(cw<=0) continue;     // behind the camera
+    const nx=(el[0]*x+el[4]*y+el[8]*z+el[12])/cw;
+    const ny=(el[1]*x+el[5]*y+el[9]*z+el[13])/cw;
+    const nz=(el[2]*x+el[6]*y+el[10]*z+el[14])/cw;                    // NDC depth (front = smaller)
+    const sx=(nx*0.5+0.5)*r.width-cx, sy=(1-(ny*0.5+0.5))*r.height-cy;
+    if(sx*sx+sy*sy<=rad2 && nz<bestZ){ bestZ=nz; best=i; }
+  }
+  return best;
+}
+function pickPoint(e){   // click pick → the point's [x,y,z] (or null)
+  const r=renderer.domElement.getBoundingClientRect();
+  const i=pickIndex(e.clientX-r.left, e.clientY-r.top, 10*10);
+  return i<0?null:[rawPos[i],rawPos[i+1],rawPos[i+2]];
+}
+renderer.domElement.addEventListener('pointerdown', e=>{ _downXY=[e.clientX,e.clientY]; });
+renderer.domElement.addEventListener('pointerup', e=>{
+  const d=_downXY; _downXY=null;
+  if(!d || _dragging) return;
+  if(Math.hypot(e.clientX-d[0], e.clientY-d[1])>4) return;   // moved = orbit/drag, not a pick
+  if(analyzeMode){ const p=pickPoint(e);
+    if(p && window._bridge) window._bridge.pointPicked(p[0],p[1],p[2]); return; }
+  if(!boxEditable) return;
+  const r=renderer.domElement.getBoundingClientRect();
+  raycaster.setFromCamera(new THREE.Vector2(((e.clientX-r.left)/r.width)*2-1,
+                                            -((e.clientY-r.top)/r.height)*2+1), camera);
+  const hits=raycaster.intersectObjects(boxes,false);
+  if(hits.length){ const idx=boxes.indexOf(hits[0].object);
+    if(idx>=0 && idx!==selBox){ selectLocal(idx); if(window._bridge) window._bridge.boxSelected(idx); } }
+});
+function selectLocal(idx){ selBox=idx;
+  for(let i=0;i<boxes.length;i++) styleBox(boxes[i],i,i===selBox);
+  const m=selMesh(); if(m && boxEditable) tc.attach(m);
+  if(hiMode===2) refreshRange(); }
+
+const readout=document.getElementById('readout'), bar=document.getElementById('bar');
+const bT=document.getElementById('bT'), bR=document.getElementById('bR'),
+      bS=document.getElementById('bS'), bReset=document.getElementById('bReset');
+function setMode(m){ tc.setMode(m);
+  tc.setSpace(m==='translate'?'world':'local');   // move in world, rotate/scale local
+  bT.classList.toggle('on',m==='translate');
+  bR.classList.toggle('on',m==='rotate');
+  bS.classList.toggle('on',m==='scale'); }
+bT.onclick=()=>setMode('translate'); bR.onclick=()=>setMode('rotate'); bS.onclick=()=>setMode('scale');
+bReset.onclick=()=>{ const m=selMesh(); if(!m)return; m.quaternion.set(0,0,0,1); liveMeasure(); sendBox(true); };
+addEventListener('keydown', e=>{ if(!tc.enabled) return;
+  if(e.key==='w')setMode('translate'); if(e.key==='e')setMode('rotate'); if(e.key==='r')setMode('scale'); });
+
+function sendBox(final){
+  if(!window._bridge) return; const m=selMesh(); if(!m) return;
+  const p=m.position, s=m.scale, q=m.quaternion;
+  window._bridge.boxChanged(selBox, p.x,p.y,p.z, s.x,s.y,s.z, q.x,q.y,q.z,q.w, final);
+}
+
+// cheap live readout while dragging — measured in the box's OWN frame (OBB).
+// The authoritative trim/voxel/fill line is computed in measure.py and pushed
+// back through api.setReadout when the drag settles. Unit + decimals track the
+// panel (mm/m) via api.setUnit so the drag numbers read in the same unit as it.
+let liveUnit='mm', liveDec=4;   // overwritten by api.setUnit on load (mm→4 decimals)
+// one O(N) pass projecting the cloud into the box frame — shared by the live
+// drag readout AND the height-map colour range. abs(scale): dragging a scale
+// handle through centre flips scale negative for a frame; without abs the
+// half-extents go negative and reject every point.
+function scanBox(){
+  const m=selMesh();
+  if(!rawPos || !m || !m.visible) return null;
+  const e=new THREE.Matrix4().makeRotationFromQuaternion(m.quaternion).elements;
+  const Xx=e[0],Xy=e[1],Xz=e[2],Yx=e[4],Yy=e[5],Yz=e[6],Zx=e[8],Zy=e[9],Zz=e[10];
+  const cx=m.position.x,cy=m.position.y,cz=m.position.z;
+  const hx=Math.abs(m.scale.x)/2,hy=Math.abs(m.scale.y)/2,hz=Math.abs(m.scale.z)/2;
+  let n=0,zmn=1e9,zmx=-1e9,xmn=1e9,xmx=-1e9,ymn=1e9,ymx=-1e9;
+  for(let i=0;i<rawPos.length;i+=3){
+    const dx=rawPos[i]-cx,dy=rawPos[i+1]-cy,dz=rawPos[i+2]-cz;
+    const lx=dx*Xx+dy*Xy+dz*Xz; if(lx<-hx||lx>hx)continue;
+    const ly=dx*Yx+dy*Yy+dz*Yz; if(ly<-hy||ly>hy)continue;
+    const lz=dx*Zx+dy*Zy+dz*Zz; if(lz<-hz||lz>hz)continue;
+    n++; if(lz<zmn)zmn=lz; if(lz>zmx)zmx=lz;
+    if(lx<xmn)xmn=lx; if(lx>xmx)xmx=lx; if(ly<ymn)ymn=ly; if(ly>ymx)ymx=ly; }
+  return {n,zmn,zmx,xmn,xmx,ymn,ymx};
+}
+// fit the height-map ramp to the points actually in the box (full colour range
+// even when the pins occupy only part of it); called on the non-drag events
+function refreshRange(){ const s=scanBox(); if(s&&s.n) pmat.uniforms.uHRange.value.set(s.zmn,s.zmx); }
+function liveMeasure(){
+  const s=scanBox(); if(!s) return;
+  if(s.n && hiMode===2) pmat.uniforms.uHRange.value.set(s.zmn,s.zmx);
+  const f=v=>v.toFixed(liveDec);
+  readout.style.display='block';
+  readout.textContent = s.n===0 ? '▣  box is empty'
+    : `▣  ${s.n.toLocaleString()} pts   (dragging…)\n`+
+      `   height  ${f(s.zmx-s.zmn)} ${liveUnit}  (box Z)\n`+
+      `   section ${f(s.xmx-s.xmn)} × ${f(s.ymx-s.ymn)} ${liveUnit}`;
+}
+
+// ---- the API Python drives (window.api.*) ----
+window.api={
+  loadCloud(url, n, flags, reset){
+    // A rapid re-push deletes the previous .bin; its fetch can 404. Reject on
+    // !ok and bail on a short buffer so a superseded frame is ignored, not
+    // sliced into a RangeError. buildPoints does NOT re-measure — the box
+    // readout is owned by measure.py (setReadout) except during a live drag.
+    const need=15*n+((flags&1?1:0)+(flags&2?1:0)+(flags&4?1:0))*n;
+    fetch(url).then(r=>r.ok?r.arrayBuffer():Promise.reject(r.status)).then(buf=>{
+      if(buf.byteLength<need) return;
+      N=n;
+      rawPos=new Float32Array(buf,0,3*n);
+      rawCol=new Uint8Array(buf,12*n,3*n);
+      let off=15*n;
+      rawOri=(flags&1)?new Uint8Array(buf,off,n):null; if(flags&1)off+=n;
+      rawRel=(flags&2)?new Uint8Array(buf,off,n):null; if(flags&2)off+=n;
+      rawModel=(flags&4)?new Uint8Array(buf,off,n):null; if(flags&4)off+=n;
+      buildPoints(!!reset);
+      if(hiMode===2) refreshRange();   // re-fit the height ramp to the new cloud
+    }).catch(()=>{});   // a stale fetch for a cloud already replaced — ignore
+  },
+  clearCloud(){ if(points){ scene.remove(points); points.geometry.dispose(); points=null; }
+    rawPos=null; N=0; readout.style.display='none'; },
+  setColorMode(m){ colorMode=m; recolor(); },
+  setModelHidden(idx, on){ if(on)hidden.add(idx); else hidden.delete(idx); applyVisibility(); },
+  clearHidden(){ hidden.clear(); applyVisibility(); },
+  setPointSize(s){ pmat.uniforms.uSize.value=s*devicePixelRatio; },
+  setUnit(u, dec){ liveUnit=u; liveDec=dec; },
+  // draw the whole set of boxes; `selected` is the one the gizmo edits (or -1)
+  setBoxes(arr, selected, editable){
+    while(boxes.length<arr.length) boxes.push(makeBoxMesh());
+    while(boxes.length>arr.length) disposeBoxMesh(boxes.pop());
+    for(let i=0;i<arr.length;i++){ const b=boxes[i],a=arr[i];
+      b.position.set(a.c[0],a.c[1],a.c[2]);
+      b.scale.set(a.s[0],a.s[1],a.s[2]);
+      b.quaternion.set(a.q[0],a.q[1],a.q[2],a.q[3]); b.visible=true; }
+    selBox = (selected>=0 && selected<boxes.length) ? selected : -1;
+    boxEditable = !!editable;
+    for(let i=0;i<boxes.length;i++) styleBox(boxes[i],i,i===selBox);
+    const m=selMesh();
+    if(editable && m){ tc.attach(m); tc.enabled=true; tc.visible=true; bar.style.display='flex'; }
+    else { tc.detach(); tc.enabled=false; tc.visible=false; bar.style.display='none';
+           if(!boxes.length) readout.style.display='none'; }
+    if(hiMode===2) refreshRange();
+  },
+  setBoxMode(m){ setMode(m); },
+  // in-box highlight: which visual (off/highlight/height/trim) + whether outside
+  // points hide (isolate) or just dim
+  setBoxHighlight(mode){ hiMode = mode==='trim'?3 : mode==='height'?2 : mode==='highlight'?1 : 0;
+    pmat.uniforms.uMode.value=hiMode; if(hiMode===2) refreshRange(); },
+  setBoxIsolate(on){ hiIsolate=!!on; pmat.uniforms.uIsolate.value=on?1.0:0.0; },
+  setBoxTrim(lo, hi){ pmat.uniforms.uTrim.value.set(lo, hi); },
+  setReadout(txt){ if(txt){ readout.style.display='block'; readout.textContent=txt; }
+    else readout.style.display='none'; },
+  // ---- analyze tools: point picking + overlay (markers + a surface line) ----
+  setAnalyzeMode(m){ analyzeMode = m || null; if(!analyzeMode) clearAnalyzeGroup(); },
+  setAnalyzeGeom(markers, line, mr){
+    clearAnalyzeGroup();
+    const mat=new THREE.MeshBasicMaterial({color:0xffc070, depthTest:false});
+    // unit spheres, rescaled to a small constant px size each frame — so a pick dot
+    // stays crisp when you zoom in to inspect individual points (mr is now ignored)
+    for(const p of (markers||[])){ const s=new THREE.Mesh(new THREE.SphereGeometry(1,14,14), mat);
+      s.position.set(p[0],p[1],p[2]); s.renderOrder=999; scaleToPx(s,8); analyzeMarkers.push(s); analyzeGroup.add(s); }
+    if(line && line.length>=2){ const arr=new Float32Array(line.length*3);
+      for(let i=0;i<line.length;i++){ arr[i*3]=line[i][0]; arr[i*3+1]=line[i][1]; arr[i*3+2]=line[i][2]; }
+      const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(arr,3));
+      const ln=new THREE.Line(g, new THREE.LineBasicMaterial({color:0xff8828, depthTest:false}));
+      ln.renderOrder=999; analyzeGroup.add(ln); }
+  },
+  // bright dots on the exact points feeding the current measurement (the region/layer
+  // the tool actually used) — lets you verify the correct zone/level is being analyzed
+  setAnalyzeHighlight(flat){
+    if(!flat || !flat.length) return;
+    const g=new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(Float32Array.from(flat),3));
+    const m=new THREE.PointsMaterial({color:0x39ff88, size:4, sizeAttenuation:false, depthTest:false});
+    const pts=new THREE.Points(g,m); pts.renderOrder=998; analyzeGroup.add(pts);
+  },
+  clearAnalyze(){ clearAnalyzeGroup(); },
+};
+
+addEventListener('resize', ()=>{ camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); });
+
+// --- point-under-cursor probe: coords (+ depth = z in the camera frame) of the
+// nearest visible point, in a small card that follows the pointer. The O(N) pick is
+// throttled to ~18 Hz and skipped while a button is held (orbiting / dragging a box).
+const hoverInfo=document.getElementById('hoverInfo');
+// a small marker that sits ON the hovered point (drawn over everything, so it's the
+// unambiguous "this exact point" cue). Base radius 1 → scaled to a constant screen
+// size each frame, so it stays a crisp dot at any zoom.
+const hoverMarker=new THREE.Mesh(new THREE.SphereGeometry(1,16,16),
+  new THREE.MeshBasicMaterial({color:0xff6a3d, depthTest:false, transparent:true, opacity:0.95}));
+hoverMarker.renderOrder=1000; hoverMarker.visible=false; scene.add(hoverMarker);
+function hideHover(){ if(hoverInfo.style.display!=='none') hoverInfo.style.display='none';
+  hoverMarker.visible=false; }
+controls.addEventListener('change', ()=>{ _repick=true; });   // zoom/orbit/pan moved the view
+renderer.domElement.addEventListener('pointermove', e=>{
+  if(e.buttons){ _hoverXY=null; return; }            // mid orbit/drag — no probe
+  _hoverXY=[e.clientX, e.clientY];
+});
+renderer.domElement.addEventListener('pointerleave', ()=>{ _hoverXY=null; });
+function updateHover(){
+  if(!_hoverXY || !rawPos){ hideHover(); return; }
+  const now=performance.now();
+  // re-pick (the O(N) scan) only when something actually changed — cursor moved, camera
+  // moved, or the cloud was rebuilt (_repick) — and at most ~18 Hz. A resting cursor over
+  // a still view reuses the last pick instead of re-scanning millions of points every frame.
+  if(now-_hoverT>=55 && (_repick || _hoverXY[0]!==_hoverPX || _hoverXY[1]!==_hoverPY)){
+    _hoverT=now; _repick=false; _hoverPX=_hoverXY[0]; _hoverPY=_hoverXY[1];
+    const r=renderer.domElement.getBoundingClientRect();
+    _hoverIdx=pickIndex(_hoverXY[0]-r.left, _hoverXY[1]-r.top, 13*13);
+    if(_hoverIdx>=0){ const i=_hoverIdx, f=v=>v.toFixed(liveDec), un=liveUnit;
+      hoverInfo.innerHTML =
+        `<span class="k">x</span> ${f(rawPos[i])} ${un}\n`+
+        `<span class="k">y</span> ${f(rawPos[i+1])} ${un}\n`+
+        `<span class="k">z</span> ${f(rawPos[i+2])} ${un}`; }
+  }
+  if(_hoverIdx<0 || _hoverIdx+2>=rawPos.length){ hideHover(); return; }
+  const i=_hoverIdx;
+  // the coords card — reposition every frame so it follows the cursor
+  hoverInfo.style.display='block';
+  const pad=16, w=hoverInfo.offsetWidth, h=hoverInfo.offsetHeight;
+  let lx=_hoverXY[0]+pad, ly=_hoverXY[1]+pad;          // flip near the edges to stay on-screen
+  if(lx+w>innerWidth)  lx=_hoverXY[0]-pad-w;
+  if(ly+h>innerHeight) ly=_hoverXY[1]-pad-h;
+  hoverInfo.style.left=Math.max(2,lx)+'px'; hoverInfo.style.top=Math.max(2,ly)+'px';
+  // the marker on that exact point — a constant ~12 px dot on screen, zoom-independent
+  hoverMarker.position.set(rawPos[i],rawPos[i+1],rawPos[i+2]);
+  scaleToPx(hoverMarker, 12);
+  hoverMarker.visible=true;
+}
+// feed the box transform to the point shader each frame so the in-box highlight
+// tracks the gizmo live (cheap — a few uniforms, no per-point CPU work)
+const _rotM4=new THREE.Matrix4();
+function syncBoxUniforms(){
+  const m=selMesh();
+  const active = m && m.visible && (hiMode>0 || hiIsolate);   // Isolate works on its own too
+  pmat.uniforms.uBoxOn.value = active ? 1.0 : 0.0;
+  if(!active) return;
+  pmat.uniforms.uBoxCenter.value.copy(m.position);
+  pmat.uniforms.uBoxHalf.value.set(Math.abs(m.scale.x)/2,Math.abs(m.scale.y)/2,Math.abs(m.scale.z)/2);
+  pmat.uniforms.uBoxRotT.value.setFromMatrix4(_rotM4.makeRotationFromQuaternion(m.quaternion)).transpose();
+}
+(function loop(){ requestAnimationFrame(loop); controls.update(); syncBoxUniforms();
+  for(let i=0;i<analyzeMarkers.length;i++) scaleToPx(analyzeMarkers[i], 8);   // keep pick dots small
+  updateHover(); renderer.render(scene,camera); })();
+
+// ---- bridge to Python (JS -> Python for box edits + ready) ----
+new QWebChannel(qt.webChannelTransport, (channel)=>{
+  window._bridge = channel.objects.bridge;
+  window._bridge.pageReady();
+});
+</script>
+</body>
+</html>
