@@ -6,7 +6,7 @@ to load in the app's "Raw — rectify with calibration" mode. Optionally also wr
 k_rectified.txt (for the "already rectified" mode, if you ever rectify offline).
 
 Run it with the app's venv from the repo root:
-    .venv\\Scripts\\python.exe calibrate.py <checkerboard_folder> --cols 9 --rows 6 --square 20
+    .venv\\Scripts\\python.exe tools\\calibrate.py <checkerboard_folder> --cols 9 --rows 6 --square 20
 
 --cols / --rows = number of INNER corners (a board of 10x7 SQUARES has 9x6 inner
                   corners — count the inner crossings, not the squares).
@@ -22,13 +22,16 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# tools/ lives one level below the repo root, which is what holds the studio package
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def main() -> None:
     import cv2
 
-    from studio.batch import find_pairs, load_rgb   # reuse the app's exact pairing rules
+    # the app's exact pairing + loading rules, from the Qt-free module — this CLI
+    # no longer drags the whole PySide6 GUI stack in just to match filenames
+    from studio.pairs import find_pairs, load_rgb
 
     ap = argparse.ArgumentParser(description="Single-camera stereo calibration -> calib.json")
     ap.add_argument("folder", help="folder of checkerboard stereo pairs")
