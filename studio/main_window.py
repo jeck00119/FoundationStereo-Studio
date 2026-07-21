@@ -62,6 +62,7 @@ class MainWindow(QMainWindow):
         # _update_run_enabled part-way through __init__ — anything reachable from
         # there must already exist.
         self._loaded_backend_key, self._loaded_ckpt = None, ""
+        self._last_params = None    # the params of the last dispatched run (saturation check)
         self._autodemo = bool(os.environ.get("FS_STUDIO_DEMO"))
         self._reset_cloud_view = True   # frame the camera on the next cloud
         self._cloud_pending = False     # a cloud rebuild is queued behind a busy one
@@ -593,8 +594,9 @@ class MainWindow(QMainWindow):
         key = self._compare_queue[0]
         self.viewer.compare_view.set_status(key, "running…")
         self._run_pair_version = self._pair_version
-        self.worker.runInference(self.input_panel.left_rgb, self.input_panel.right_rgb,
-                                 self._compare_params(key))
+        p = self._compare_params(key)
+        self._last_params = p
+        self.worker.runInference(self.input_panel.left_rgb, self.input_panel.right_rgb, p)
 
     def _abort_compare(self, reason: str) -> None:
         """Stop an in-flight sweep and hand the app back to the user.
@@ -1506,9 +1508,39 @@ class MainWindow(QMainWindow):
         if self.overlay.isVisible():
             self.overlay.setGeometry(self.centralWidget().rect())
 
+    @staticmethod
+    def _disparity_saturation(disp, max_disp) -> float:
+        """Fraction of valid pixels pinned at the top of the disparity search
+        range. The cost volume cannot represent matches beyond max_disp, so a
+        pile-up there means nearer-than-representable scene: the model smears
+        those regions into diagonal streaks instead of failing loudly."""
+        d = disp[disp > 0]
+        if d.size == 0 or not max_disp:
+            return 0.0
+        return float((d >= 0.97 * float(max_disp)).mean())
+
+    def _warn_if_saturated(self, result) -> None:
+        mp = getattr(self._last_params, "model_params", None) or {}
+        md = mp.get("max_disp")
+        sat = self._disparity_saturation(result.disp, md)
+        if sat < 0.02:
+            return
+        d = result.disp[result.disp > 0]
+        need = int(np.ceil(float(np.percentile(d, 99)) * 1.15 / 32.0) * 32)
+        msg = (f"{sat:.0%} of the image is pinned at the top of the disparity search "
+               f"range (Max disparity {int(md)} px at this scale). Those regions come "
+               f"out as smeared streaks, not real depth.\n\n"
+               f"Raise Max disparity to ~{need} px, or lower Input scale "
+               f"(needed disparity shrinks with scale), then Run again.")
+        if self._comparing or self._batching:
+            self._set_status("⚠ Disparity search range too small — " + msg.split("\n")[0])
+        else:
+            QMessageBox.warning(self, "Disparity range too small", msg)
+
     def _on_inference(self, result) -> None:
         if self._pair_version != self._run_pair_version:
             return   # result belongs to a pair that has since been replaced — drop it
+        self._warn_if_saturated(result)   # every consumer benefits: run, compare, batch
         if self._batching and self._batch_kind == "pairs":
             # disparity/depth land first; keep them for the views but wait for the
             # cloud (next reply) to measure. focus=False so the tab stays on
@@ -1810,6 +1842,7 @@ class MainWindow(QMainWindow):
             return
         self._run_pair_version = self._pair_version   # tag which pair this run is for
         p = self._current_params()
+        self._last_params = p          # kept for the disparity-saturation check
         self.worker.runInference(self.input_panel.left_rgb, self.input_panel.right_rgb, p)
 
     # ---------------------------------------------------------- stale cue
@@ -2054,6 +2087,7 @@ class MainWindow(QMainWindow):
             return
         self._update_batch_progress(label)        # show the one about to run
         self._run_pair_version = self._pair_version
+        self._last_params = self._batch_params
         self.worker.runInference(left, right, self._batch_params)
 
     def _batch_on_cloud(self, cloud) -> None:

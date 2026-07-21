@@ -249,3 +249,17 @@ def test_unrectified_pair_warning(qapp, tmp_path):
         p.load_image(str(rp), "right")
         warned = any("does not look rectified" in n for n in got)
         assert warned == (name == "bad"), (name, got)
+
+
+def test_disparity_saturation_detector(qapp):
+    """Pixels pinned at the top of the search range must be detected — that is
+    the smeared-cloud signature when max_disp is too small for the scene."""
+    from studio.main_window import MainWindow
+
+    d = np.full((100, 100), 120.0, np.float32)
+    assert MainWindow._disparity_saturation(d, 192) == 0.0     # healthy
+    d[:, :30] = 191.0                                          # 30% pinned at the cap
+    sat = MainWindow._disparity_saturation(d, 192)
+    assert 0.28 < sat < 0.32
+    assert MainWindow._disparity_saturation(d, None) == 0.0    # model without the knob
+    assert MainWindow._disparity_saturation(np.zeros((4, 4), np.float32), 192) == 0.0
