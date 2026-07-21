@@ -4,8 +4,7 @@ Launches the REAL WebCloudView and a real MainWindow, pushes synthetic clouds,
 drives every control, and asserts INSIDE the WebGL page (via window._dbg) what
 each one actually did. Not part of the pytest suite (it opens windows and takes
 ~30 s) — run it after touching web_cloud.py / cloud.html:
-
-    .venv\Scripts\python.exe toolserify_3d_tab.py
+    .venv/Scripts/python.exe tools/verify_3d_tab.py
 """
 import json
 import os
