@@ -17,18 +17,23 @@ Windows Triton installed (it is, in this venv), Fast-FoundationStereo runs its
 compiled cost-volume path — the first run after changing Input scale or Max
 disparity pauses once while kernels compile.
 
-## Layout
+## Map of the repository
 
-| Path | What it is |
-|---|---|
-| `studio/` | the app: `main_window.py` (workflows), `panels.py` (inputs/params), `viewers.py` + `web_cloud.py` + `web/` (2D views + three.js 3D view), `worker.py`/`engine_process.py` (GUI↔engine), `backends/` (FoundationStereo · Fast-FoundationStereo · S²M²), `infer.py`/`cloud.py` (shared pipeline), `pairs.py` (Qt-free loading + pair discovery), `measure.py`/`analyze.py`/`repeat.py`/`compare.py`/`batch.py` (metrology tools) |
-| `tools/calibrate.py` | stereo calibration → `calib.json` (+ optional `k_rectified.txt`). Checkerboard or **ChArUco** (`--charuco CXxRY --marker … --dict …`, partial views OK); `--simple-lens` pins the principal point and zeroes distortion — use it for machine-vision lenses whose image circle dwarfs the sensor |
-| `tools/pair_captures.py` | verifies + names a CNC capture session into `poseNN_left/right.jpg` by the pair's optical signature (pure horizontal shift, rows preserved) |
-| `tools/verify_3d_tab.py` | live check of every 3D-tab control against the real WebGL page (~30 s); run after touching `web_cloud.py`/`cloud.html` |
-| `tools/verify_full_process.py` | full-chain live check on the real GPU: images → calibration → model → cloud → measure → export |
-| `data/` | your captures & calibration outputs (git-ignored): `calib/calib_provisional.json`, exported clouds, … |
-| `tests/` | pytest suite (ground-truth math for the pipeline, calibration, measurement, GUI behavior): `.venv\Scripts\python.exe -m pytest tests` |
-| `requirements.txt` | pinned environment (see its header for the torch/cu128 install step) |
+Every top-level entry, labeled — this clone hosts two things at once: NVIDIA's
+FoundationStereo research code (leave as-is, it stays upstream-mergeable) and
+the local Studio app built on top of it.
+
+| Entry | Whose | What it is |
+|---|---|---|
+| `studio/` | **local** | the app. Flat, descriptively-named modules: `main_window.py` (workflows) · `panels.py` (input/param panels) · `viewers.py`, `web_cloud.py`, `web/` (2D views + three.js 3D view) · `worker.py`/`engine_process.py` (GUI↔engine child) · `backends/` (FoundationStereo · Fast-FS · S²M²) · `infer.py`/`cloud.py` (shared pipeline) · `pairs.py` (Qt-free loading/pairing) · `measure.py`/`analyze.py`/`repeat.py`/`compare.py`/`batch.py` (metrology tools) |
+| `tools/` | **local** | CLIs + diagnostics: `calibrate.py` (checkerboard or ChArUco → calib.json; `--simple-lens` for near-distortion-free lenses) · `pair_captures.py` (verifies/names CNC A-B sessions) · `verify_3d_tab.py` (~30 s live 3D-view check) · `verify_full_process.py` (full-chain live check on the GPU) |
+| `tests/` | **local** | pytest suite (pipeline/calibration/measurement ground truth + GUI behavior): `.venv\Scripts\python.exe -m pytest tests` |
+| `data/` | **local, git-ignored** | your data: `calib/` (calibration files only) · `captures/` (capture sessions) · `exports/` (generated clouds/renders) |
+| `run_studio.bat`, `requirements.txt`, `STUDIO_README.md` | **local** | launcher · pinned env (torch/cu128 note in its header) · this file |
+| `core/`, `dinov2/`, `depth_anything/`, `scripts/`, `Utils.py`, `teaser/`, `docker/` | upstream | the FoundationStereo model + demos (scripts carry two small local fixes) — don't refactor |
+| `readme.md`, `readme_jetson.md`, `environment.yml`, `LICENSE` | upstream | upstream docs; `environment.yml` is upstream's conda env — **not** this app's environment (use `requirements.txt`) |
+| `assets/` | upstream | the bundled demo pair + its `K.txt` — keep your own data out of here |
+| `pretrained_models/`, `.venv/`, `.cache/` | generated, git-ignored | FoundationStereo weights · the Python env · HF model cache |
 
 Fast-FoundationStereo and S²M² are expected as sibling clones
 (`..\Fast-FoundationStereo`, `..\s2m2`) — see `studio/backends/registry.py`.
@@ -37,11 +42,12 @@ Fast-FoundationStereo and S²M² are expected as sibling clones
 
 Per board pose: shoot at CNC position A → jog the measurement step (+X) →
 shoot at position B → then reposition/tilt the board. 10–15 poses, mixed
-heights and tilts, corners reaching the frame edges. Then:
+heights and tilts, corners reaching the frame edges. Put the session under
+`data\captures\<session>` and:
 
 ```
-.venv\Scripts\python.exe tools\pair_captures.py <capture_folder>
-.venv\Scripts\python.exe tools\calibrate.py <capture_folder>\paired --charuco 11x8 --square <MEASURED> --marker <MEASURED*2/3> --simple-lens --out data\calib\calib.json --krect
+.venv\Scripts\python.exe tools\pair_captures.py data\captures\<session>
+.venv\Scripts\python.exe tools\calibrate.py data\captures\<session>\paired --charuco 11x8 --square <MEASURED> --marker <MEASURED*2/3> --simple-lens --out data\calib\calib.json --krect
 ```
 
 `--square` is the caliper-MEASURED size (printers rescale by ~1 %). The tool

@@ -1,3 +1,5 @@
+> **This clone also hosts [FoundationStereo Studio](STUDIO_README.md)** — a local PySide6 metrology app built on top of this code. Everything below is NVIDIA's original readme.
+
 # FoundationStereo: Zero-Shot Stereo Matching
 
 This is the official implementation of our paper accepted by CVPR 2025 Oral (**Best Paper Nomination**)
