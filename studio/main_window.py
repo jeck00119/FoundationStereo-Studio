@@ -1200,11 +1200,17 @@ class MainWindow(QMainWindow):
             caption="above the board plane" + ("  (zeroed)" if off else ""))
 
     def _default_box(self):
-        """A new box: the current box's size, tilt-free, centred on the cloud."""
+        """A new box: the current box's size, tilt-free, centred ON the cloud —
+        on the actual point nearest the componentwise median. The bare median is
+        a point in EMPTY SPACE on deep or sparse scenes (median x/y/z need not
+        lie on any surface), and a box centred there caught nothing."""
         ref = self.param_panel.measure_box()
         if self._has_points(self.cloud):
-            med = np.median(np.asarray(self.cloud.points), axis=0)
-            cx, cy, cz = float(med[0]), float(med[1]), float(med[2])
+            pts = np.asarray(self.cloud.points)
+            sub = pts[::max(1, len(pts) // 200_000)]     # nearest-point snap, kept cheap
+            med = np.median(sub, axis=0)
+            near = sub[int(np.argmin(((sub - med) ** 2).sum(1)))]
+            cx, cy, cz = float(near[0]), float(near[1]), float(near[2])
         else:
             cx, cy, cz = ref.cx, ref.cy, ref.cz
         return MeasureBox(cx=cx, cy=cy, cz=cz, sx=ref.sx, sy=ref.sy, sz=ref.sz,
@@ -1569,6 +1575,15 @@ class MainWindow(QMainWindow):
         self.viewer.show_cloud(cloud, reset_view=self._reset_cloud_view)
         self._reset_cloud_view = False
         self.points_lbl.setText(f"{cloud.n:,} pts" if cloud else "")
+        if (cloud is not None and cloud.n == 0 and self.result is not None
+                and self.result.depth is not None and (self.result.depth > 0).any()):
+            # Depth exists but the z-clip ate every point — on the PCB-tuned
+            # default z-far (250 mm) ANY metre-scale scene lands here, showing
+            # an inexplicably empty 3D tab with a cheerful "Done." Say why.
+            self._set_status(
+                f"Cloud is empty — every point fell outside the z-near/z-far range "
+                f"(z-far {self.param_panel.z_far.value():g} {self._units}). Raise "
+                "z-far in the Point cloud section; the cloud rebuilds live.")
         self._apply_measure()
         if fresh:
             self._reset_analyze_overlay()       # picks belonged to the old reconstruction
