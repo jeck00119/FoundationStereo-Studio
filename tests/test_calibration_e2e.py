@@ -221,3 +221,46 @@ def test_charuco_recovers_the_true_camera(charuco_run):
     calib = StereoCalibration.load(str(out))
     rect = Rectifier(calib, (W, H))
     assert abs(rect.baseline - 5.0) < 0.05
+
+
+def test_pair_captures_auto_pairs_by_shift_signature(tmp_path):
+    """Timestamp-style captures (A shot, CNC step, B shot, board move, ...)
+    must auto-pair, assign left/right by shift sign, and skip strays."""
+    board = _charuco_board()
+    bimg = board.generateImage((int(CH_SX * CH_SQ * PPMM), int(CH_SY * CH_SQ * PPMM)),
+                               marginSize=0, borderBits=1)
+    poses = _charuco_poses()[:4]
+    seq = 0
+    for k, (rvec, tvec) in enumerate(poses[:3]):        # 3 true pairs, order A,B
+        for shot in (tvec, tvec - T_TRUE):              # A = left, B = right (camera +X)
+            cv2.imwrite(str(tmp_path / f"cap{seq:03d}.jpg"), _charuco_view(bimg, rvec, shot))
+            seq += 1
+    rvec, tvec = poses[3]                                # one stray single view
+    cv2.imwrite(str(tmp_path / f"cap{seq:03d}.jpg"), _charuco_view(bimg, rvec, tvec))
+
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    argv, sys.argv = sys.argv, ["pair_captures.py", str(tmp_path),
+                                "--charuco", f"{CH_SX}x{CH_SY}",
+                                "--square", str(CH_SQ), "--marker", str(CH_MK)]
+    try:
+        runpy.run_path(os.path.join(repo, "tools", "pair_captures.py"), run_name="__main__")
+    except SystemExit as e:
+        assert not e.code
+    finally:
+        sys.argv = argv
+
+    out = tmp_path / "paired"
+    lefts = sorted(p.name for p in out.glob("*_left.jpg"))
+    rights = sorted(p.name for p in out.glob("*_right.jpg"))
+    assert len(lefts) == len(rights) == 3
+    # left/right assignment: the LEFT eye sees the board shifted RIGHT (bigger x).
+    # Verify optically on pose01: mean corner x(left) > mean corner x(right).
+    det = cv2.aruco.CharucoDetector(board)
+    gl = cv2.imread(str(out / "pose01_left.jpg"), cv2.IMREAD_GRAYSCALE)
+    gr = cv2.imread(str(out / "pose01_right.jpg"), cv2.IMREAD_GRAYSCALE)
+    cl, il, _, _ = det.detectBoard(gl)
+    cr, ir, _, _ = det.detectBoard(gr)
+    common, ia, ib = np.intersect1d(il.ravel(), ir.ravel(), return_indices=True)
+    assert len(common) >= 6
+    dx = cl.reshape(-1, 2)[ia, 0] - cr.reshape(-1, 2)[ib, 0]
+    assert dx.mean() > 50                    # positive disparity: left is truly left
