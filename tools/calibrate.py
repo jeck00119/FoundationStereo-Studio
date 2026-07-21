@@ -62,6 +62,12 @@ def main() -> None:
     ap.add_argument("--alpha", type=float, default=0.0, help="stereoRectify alpha (0=crop, 1=keep all)")
     ap.add_argument("--force", action="store_true",
                     help="write outputs even if the reprojection-RMS quality gates fail")
+    ap.add_argument("--simple-lens", action="store_true",
+                    help="constrain the model: principal point at the image centre, zero "
+                         "distortion. For near-distortion-free machine-vision lenses "
+                         "(image circle >> sensor) this removes the degenerate directions "
+                         "a free model dumps noise into (a wandering cx/cy + spurious k1 "
+                         "can render stereoRectify unusable) at <0.1 px model cost.")
     args = ap.parse_args()
 
     charuco = None
@@ -157,9 +163,20 @@ def main() -> None:
         sys.exit(1)
 
     # single-camera intrinsics from ALL views (left + right are the same camera)
-    rms, K, D, _, _ = cv2.calibrateCamera(intr_obj, intr_img, size, None, None)
+    if args.simple_lens:
+        flags = (cv2.CALIB_USE_INTRINSIC_GUESS | cv2.CALIB_FIX_PRINCIPAL_POINT
+                 | cv2.CALIB_ZERO_TANGENT_DIST | cv2.CALIB_FIX_K1 | cv2.CALIB_FIX_K2
+                 | cv2.CALIB_FIX_K3 | cv2.CALIB_FIX_K4 | cv2.CALIB_FIX_K5
+                 | cv2.CALIB_FIX_K6)
+        K0 = np.array([[1000.0, 0, size[0] / 2], [0, 1000.0, size[1] / 2], [0, 0, 1]])
+        rms, K, D, _, _ = cv2.calibrateCamera(intr_obj, intr_img, size, K0,
+                                              np.zeros(5), flags=flags)
+    else:
+        rms, K, D, _, _ = cv2.calibrateCamera(intr_obj, intr_img, size, None, None)
     print(f"\nIntrinsics reproj RMS: {rms:.3f} px  (aim < ~0.5)  "
-          f"[{len(intr_obj)} views]")
+          f"[{len(intr_obj)} views]"
+          + ("  [simple-lens model]" if args.simple_lens else ""))
+    print(f"fx={K[0,0]:.1f}  fy={K[1,1]:.1f}  cx={K[0,2]:.1f}  cy={K[1,2]:.1f}")
 
     # stereo extrinsics R, T between the two shots, with intrinsics held fixed
     res = cv2.stereoCalibrate(st_obj, st_L, st_R, K, D, K, D, size,

@@ -277,3 +277,33 @@ def test_is_cnc_pair_classifier():
     assert not is_cnc_pair(474, -14.1, 20.0)     # scattered rows: board moved
     assert not is_cnc_pair(200, 113, 3.0)        # diagonal nudge, not the axis
     assert not is_cnc_pair(10, 0.0, 0.5)         # jitter, not a step
+
+
+def test_charuco_simple_lens_model(tmp_path):
+    """--simple-lens (fixed principal point, zero distortion) must recover the
+    zero-distortion synthetic camera just as well as the free model."""
+    board = _charuco_board()
+    bimg = board.generateImage((int(CH_SX * CH_SQ * PPMM), int(CH_SY * CH_SQ * PPMM)),
+                               marginSize=0, borderBits=1)
+    for i, (rvec, tvec) in enumerate(_charuco_poses()):
+        cv2.imwrite(str(tmp_path / f"cap{i:02d}_left.png"), _charuco_view(bimg, rvec, tvec))
+        cv2.imwrite(str(tmp_path / f"cap{i:02d}_right.png"),
+                    _charuco_view(bimg, rvec, tvec - T_TRUE))
+    out = tmp_path / "calib.json"
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    argv, sys.argv = sys.argv, ["calibrate.py", str(tmp_path), "--charuco",
+                                f"{CH_SX}x{CH_SY}", "--square", str(CH_SQ),
+                                "--marker", str(CH_MK), "--simple-lens",
+                                "--out", str(out)]
+    try:
+        runpy.run_path(os.path.join(repo, "tools", "calibrate.py"), run_name="__main__")
+    except SystemExit as e:
+        assert not e.code
+    finally:
+        sys.argv = argv
+    blob = json.loads(out.read_text())
+    K = np.array(blob["K"])
+    assert abs(K[0, 0] - K_TRUE[0, 0]) / K_TRUE[0, 0] < 0.01
+    assert K[0, 2] == 320.0 and K[1, 2] == 240.0          # pinned at centre
+    assert all(abs(d) < 1e-9 for d in blob["D"])          # zero distortion
+    assert abs(np.linalg.norm(np.array(blob["T"])) - 5.0) < 0.05
