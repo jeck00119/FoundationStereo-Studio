@@ -1,17 +1,27 @@
 """One-shot camera calibration for the single-camera CNC stereo rig.
 
-Point it at a folder of CHECKERBOARD stereo pairs (the same left/right naming the
-app's batch understands) and it writes calib.json (K, D, R, T, image_size) ready
-to load in the app's "Raw — rectify with calibration" mode. Optionally also writes
-k_rectified.txt (for the "already rectified" mode, if you ever rectify offline).
+Point it at a folder of calibration-target stereo pairs (the same left/right
+naming the app's batch understands) and it writes calib.json (K, D, R, T,
+image_size) ready to load in the app's "Raw — rectify with calibration" mode.
+Optionally also writes k_rectified.txt (for the "already rectified" mode).
 
-Run it with the app's venv from the repo root:
-    .venv\\Scripts\\python.exe tools\\calibrate.py <checkerboard_folder> --cols 9 --rows 6 --square 20
+Two target types:
 
---cols / --rows = number of INNER corners (a board of 10x7 SQUARES has 9x6 inner
-                  corners — count the inner crossings, not the squares).
---square        = the physical size of ONE square, measured with calipers, in --unit.
---unit          = mm (default) or m. This sets the baseline unit you pick in the app.
+CHECKERBOARD (classic — the whole board must be visible in every image):
+    .venv\\Scripts\\python.exe tools\\calibrate.py <folder> --cols 9 --rows 6 --square 20
+    --cols / --rows = INNER corners (a 10x7-SQUARE board has 9x6 inner corners).
+
+CHARUCO (recommended — PARTIAL views count, so it works when the board is
+bigger than the field of view, and corners can reach the frame edges):
+    .venv\\Scripts\\python.exe tools\\calibrate.py <folder> --charuco 11x8 --square 6 --marker 4
+    --charuco = the board's SQUARES, columns x rows (an "8x11" print held
+                landscape is 11x8 — if you get 0 corners, the order is wrong).
+    --marker  = the ArUco marker's physical size; --dict its dictionary (4X4_50
+                default). Both sizes in --unit.
+
+--square is the physical size of ONE square, MEASURED WITH CALIPERS across as
+many squares as possible (printers rescale by up to ~1%) — never the nominal
+value. --unit (mm default) sets the baseline unit you pick in the app.
 """
 from __future__ import annotations
 
@@ -34,10 +44,18 @@ def main() -> None:
     from studio.pairs import find_pairs, load_rgb
 
     ap = argparse.ArgumentParser(description="Single-camera stereo calibration -> calib.json")
-    ap.add_argument("folder", help="folder of checkerboard stereo pairs")
-    ap.add_argument("--cols", type=int, required=True, help="inner corners across")
-    ap.add_argument("--rows", type=int, required=True, help="inner corners down")
-    ap.add_argument("--square", type=float, required=True, help="one square's physical size")
+    ap.add_argument("folder", help="folder of calibration-target stereo pairs")
+    ap.add_argument("--cols", type=int, help="checkerboard: inner corners across")
+    ap.add_argument("--rows", type=int, help="checkerboard: inner corners down")
+    ap.add_argument("--charuco", metavar="CXxRY",
+                    help="ChArUco board SQUARES, columns x rows (e.g. 11x8). "
+                         "Partial views are fine — corners are matched by marker ID.")
+    ap.add_argument("--marker", type=float,
+                    help="ChArUco: the ArUco marker's physical size (same unit as --square)")
+    ap.add_argument("--dict", default="4X4_50", dest="adict",
+                    help="ChArUco: ArUco dictionary (default 4X4_50)")
+    ap.add_argument("--square", type=float, required=True,
+                    help="one square's physical size — caliper-MEASURED, not nominal")
     ap.add_argument("--unit", default="mm", choices=["mm", "m"], help="unit of --square (default mm)")
     ap.add_argument("--out", default="calib.json", help="output calibration file")
     ap.add_argument("--krect", action="store_true", help="also write k_rectified.txt")
@@ -46,21 +64,61 @@ def main() -> None:
                     help="write outputs even if the reprojection-RMS quality gates fail")
     args = ap.parse_args()
 
+    charuco = None
+    if args.charuco:
+        try:
+            sx, sy = (int(v) for v in args.charuco.lower().split("x"))
+        except ValueError:
+            ap.error("--charuco must look like 11x8 (squares across x squares down)")
+        if not args.marker:
+            ap.error("--charuco needs --marker (the ArUco marker's physical size)")
+        dname = "DICT_" + args.adict.upper().removeprefix("DICT_")
+        if not hasattr(cv2.aruco, dname):
+            ap.error(f"unknown ArUco dictionary {args.adict!r}")
+        board = cv2.aruco.CharucoBoard(
+            (sx, sy), float(args.square), float(args.marker),
+            cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, dname)))
+        charuco = (board, cv2.aruco.CharucoDetector(board),
+                   board.getChessboardCorners().astype(np.float32))
+    elif not (args.cols and args.rows):
+        ap.error("give either --cols/--rows (checkerboard) or --charuco (ChArUco)")
+
     scan = find_pairs(args.folder)
     if not scan.pairs:
         print(f"No stereo pairs found in {args.folder} ({scan.method}).")
         sys.exit(1)
-    print(f"Found {len(scan.pairs)} checkerboard pairs ({scan.method}).")
-
-    pattern = (args.cols, args.rows)
-    objp = np.zeros((args.rows * args.cols, 3), np.float32)
-    objp[:, :2] = np.mgrid[0:args.cols, 0:args.rows].T.reshape(-1, 2)
-    objp *= float(args.square)                       # object points in the chosen unit
+    print(f"Found {len(scan.pairs)} target pairs ({scan.method}).")
 
     crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 40, 1e-4)
-    find_flags = cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE
-    objpoints, ptsL, ptsR = [], [], []
+    MIN_CORNERS = 6            # per view (intrinsics) and per pair (stereo, common IDs)
+    intr_obj, intr_img = [], []              # every usable single VIEW (left + right)
+    st_obj, st_L, st_R = [], [], []          # per-PAIR matched correspondences
     size = None
+
+    if charuco is None:
+        pattern = (args.cols, args.rows)
+        objp = np.zeros((args.rows * args.cols, 3), np.float32)
+        objp[:, :2] = np.mgrid[0:args.cols, 0:args.rows].T.reshape(-1, 2)
+        objp *= float(args.square)           # object points in the chosen unit
+        find_flags = cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE
+
+    def _detect(gray):
+        """(corner_ids, image_points) for one view — full board for checker,
+        whatever is visible for ChArUco."""
+        if charuco is None:
+            ok, c = cv2.findChessboardCorners(gray, pattern, find_flags)
+            if not ok:
+                return None, None
+            c = cv2.cornerSubPix(gray, c, (11, 11), (-1, -1), crit)
+            return np.arange(len(objp)), c.reshape(-1, 2)
+        ch_c, ch_ids, _mc, _mi = charuco[1].detectBoard(gray)
+        if ch_ids is None or len(ch_ids) < MIN_CORNERS:
+            return None, None
+        return ch_ids.ravel(), ch_c.reshape(-1, 2)
+
+    def _obj_for(ids):
+        return (objp if charuco is None else charuco[2])[ids]
+
     for label, lp, rp in scan.pairs:
         gl = cv2.cvtColor(load_rgb(lp), cv2.COLOR_RGB2GRAY)
         gr = cv2.cvtColor(load_rgb(rp), cv2.COLOR_RGB2GRAY)
@@ -72,30 +130,39 @@ def main() -> None:
             print(f"  SKIP  {label} — {gl.shape[1]}×{gl.shape[0]} differs from "
                   f"{size[0]}×{size[1]} (every pair must share one resolution)")
             continue
-        okl, cl = cv2.findChessboardCorners(gl, pattern, find_flags)
-        okr, cr = cv2.findChessboardCorners(gr, pattern, find_flags)
-        if okl and okr:
-            cl = cv2.cornerSubPix(gl, cl, (11, 11), (-1, -1), crit)
-            cr = cv2.cornerSubPix(gr, cr, (11, 11), (-1, -1), crit)
-            objpoints.append(objp)
-            ptsL.append(cl)
-            ptsR.append(cr)
-            print(f"  found: {label}")
-        else:
-            miss = "both" if not (okl or okr) else ("left" if not okl else "right")
-            print(f"  SKIP  {label} — no corners in {miss}")
+        idl, cl = _detect(gl)
+        idr, cr = _detect(gr)
+        for ids, c in ((idl, cl), (idr, cr)):    # intrinsics: single camera, both shots
+            if ids is not None:
+                intr_obj.append(_obj_for(ids))
+                intr_img.append(c.astype(np.float32))
+        if idl is None or idr is None:
+            miss = "both" if idl is None and idr is None else ("left" if idl is None else "right")
+            print(f"  SKIP  {label} — no target in {miss}")
+            continue
+        common = np.intersect1d(idl, idr)        # stereo: corners BOTH shots identified
+        if len(common) < MIN_CORNERS:
+            print(f"  SKIP  {label} — only {len(common)} corners seen by both shots")
+            continue
+        li = {i: k for k, i in enumerate(idl)}
+        ri = {i: k for k, i in enumerate(idr)}
+        st_obj.append(_obj_for(common))
+        st_L.append(cl[[li[i] for i in common]].astype(np.float32))
+        st_R.append(cr[[ri[i] for i in common]].astype(np.float32))
+        print(f"  found: {label}  ({len(common)} shared corners)")
 
-    if len(objpoints) < 6:
-        print(f"\nOnly {len(objpoints)} usable pairs — need ~10+ covering the frame + tilts. "
-              "Shoot more checkerboard poses.")
+    if len(st_obj) < 6:
+        print(f"\nOnly {len(st_obj)} usable pairs — need ~10+ covering the frame + tilts. "
+              "Shoot more target poses.")
         sys.exit(1)
 
     # single-camera intrinsics from ALL views (left + right are the same camera)
-    rms, K, D, _, _ = cv2.calibrateCamera(objpoints + objpoints, ptsL + ptsR, size, None, None)
-    print(f"\nIntrinsics reproj RMS: {rms:.3f} px  (aim < ~0.5)")
+    rms, K, D, _, _ = cv2.calibrateCamera(intr_obj, intr_img, size, None, None)
+    print(f"\nIntrinsics reproj RMS: {rms:.3f} px  (aim < ~0.5)  "
+          f"[{len(intr_obj)} views]")
 
     # stereo extrinsics R, T between the two shots, with intrinsics held fixed
-    res = cv2.stereoCalibrate(objpoints, ptsL, ptsR, K, D, K, D, size,
+    res = cv2.stereoCalibrate(st_obj, st_L, st_R, K, D, K, D, size,
                               criteria=crit, flags=cv2.CALIB_FIX_INTRINSIC)
     srms, R, T = float(res[0]), np.asarray(res[5]), np.asarray(res[6])
     print(f"Stereo    reproj RMS: {srms:.3f} px  (aim < ~1.0)")

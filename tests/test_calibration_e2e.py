@@ -141,3 +141,83 @@ def test_rectifier_derives_truth_and_flattens_epipolar_lines(calib_run):
     dx = cl.reshape(-1, 2)[:, 0] - cr.reshape(-1, 2)[:, 0]
     z_est = rect.fx * rect.baseline / np.maximum(dx, 1e-6)
     assert 300 < float(np.median(z_est)) < 520                     # plausible pose depth (mm)
+
+
+# ===================================================== ChArUco path (partial views)
+CH_SX, CH_SY = 11, 8                 # the user's board: 11 squares wide x 8 tall
+CH_SQ, CH_MK = 6.0, 4.0              # mm
+PPMM = 20                            # board raster: px per mm
+
+
+def _charuco_board():
+    return cv2.aruco.CharucoBoard(
+        (CH_SX, CH_SY), CH_SQ, CH_MK,
+        cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50))
+
+
+def _charuco_view(bimg, rvec, tvec, W=640, H=480):
+    """Project the rasterized board (Z=0 plane, PPMM px/mm) through the TRUE
+    zero-distortion camera: H = K [r1 r2 t] composed with the mm->raster scale."""
+    R, _ = cv2.Rodrigues(rvec)
+    Hmm = K_TRUE @ np.column_stack([R[:, 0], R[:, 1], tvec])
+    Hpx = Hmm @ np.diag([1.0 / PPMM, 1.0 / PPMM, 1.0])
+    return cv2.warpPerspective(bimg, Hpx, (W, H), flags=cv2.INTER_LINEAR,
+                               borderMode=cv2.BORDER_CONSTANT, borderValue=255)
+
+
+def _charuco_poses():
+    """Close-range poses like the real rig: the board OVERFILLS the frame in the
+    nearer ones, so partial views are genuinely exercised."""
+    out = []
+    for i, (rx, ry, ox, oy, z) in enumerate([
+            (0.00, 0.00, 0, 0, 72), (0.15, 0.00, 8, 4, 64),
+            (-0.15, 0.10, -8, 6, 80), (0.10, -0.20, 10, -6, 60),
+            (-0.12, -0.12, -12, -5, 84), (0.20, 0.12, 5, 8, 76),
+            (0.00, 0.22, -6, 9, 68), (-0.22, 0.00, 7, -9, 82),
+            (0.12, 0.16, -10, -3, 62), (-0.08, -0.22, 9, 6, 86),
+            (0.22, -0.08, 0, -8, 70), (-0.18, 0.18, -4, 4, 78)]):
+        rvec = np.array([rx, ry, 0.04 * ((i % 3) - 1)])
+        # board local coords run 0..66 x 0..48 mm; centre it near the axis
+        tvec = np.array([-CH_SX * CH_SQ / 2 + ox, -CH_SY * CH_SQ / 2 + oy, float(z)])
+        out.append((rvec, tvec))
+    return out
+
+
+@pytest.fixture(scope="module")
+def charuco_run(tmp_path_factory):
+    board = _charuco_board()
+    bimg = board.generateImage((int(CH_SX * CH_SQ * PPMM), int(CH_SY * CH_SQ * PPMM)),
+                               marginSize=0, borderBits=1)
+    folder = tmp_path_factory.mktemp("charuco")
+    for i, (rvec, tvec) in enumerate(_charuco_poses()):
+        cv2.imwrite(str(folder / f"cap{i:02d}_left.png"), _charuco_view(bimg, rvec, tvec))
+        cv2.imwrite(str(folder / f"cap{i:02d}_right.png"),
+                    _charuco_view(bimg, rvec, tvec - T_TRUE))
+    out = folder / "calib.json"
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    argv, sys.argv = sys.argv, ["calibrate.py", str(folder), "--charuco",
+                                f"{CH_SX}x{CH_SY}", "--square", str(CH_SQ),
+                                "--marker", str(CH_MK), "--dict", "4X4_50",
+                                "--out", str(out)]
+    try:
+        runpy.run_path(os.path.join(repo, "tools", "calibrate.py"), run_name="__main__")
+    except SystemExit as e:
+        assert not e.code, f"calibrate.py (charuco) exited with {e.code}"
+    finally:
+        sys.argv = argv
+    return folder, out
+
+
+def test_charuco_recovers_the_true_camera(charuco_run):
+    """Partial ChArUco views through the real tool must recover the camera the
+    views were rendered with (zero distortion, so the solve is razor-sharp)."""
+    _folder, out = charuco_run
+    blob = json.loads(out.read_text())
+    K = np.array(blob["K"])
+    T = np.array(blob["T"])
+    assert abs(K[0, 0] - K_TRUE[0, 0]) / K_TRUE[0, 0] < 0.01
+    assert abs(K[0, 2] - K_TRUE[0, 2]) < 5 and abs(K[1, 2] - K_TRUE[1, 2]) < 5
+    assert abs(np.linalg.norm(T) - 5.0) < 0.05       # the CNC step
+    calib = StereoCalibration.load(str(out))
+    rect = Rectifier(calib, (W, H))
+    assert abs(rect.baseline - 5.0) < 0.05
