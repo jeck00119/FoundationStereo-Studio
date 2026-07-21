@@ -65,6 +65,7 @@ platform-neutral and `setup_jetson.sh` / `run_studio.sh` exist but are
    lower the scale further. A TensorRT backend (new adapter in
    `studio/backends/`, fixed input size, FP16 engine via upstream
    `scripts/make_onnx.py` + trtexec) is the planned proper solution.
+   The calibration (`data/calib/*.json`) is IN GIT — no copying needed.
 3. Validate with `pytest tests` (offscreen: `QT_QPA_PLATFORM=offscreen`), then
    `tools/verify_full_process.py`. Commit fixes to `orin`; merge to `master`
    what applies to both platforms.

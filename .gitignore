@@ -10,6 +10,12 @@ DATA/*
 test_outputs/
 .cache/
 .pytest_cache/
-data/
 studio/_spike_web/
 *.log
+
+# data/ stays local — EXCEPT calibration .json files, which are small,
+# device-independent, and needed on every machine (the Orin gets them via git)
+data/*
+!data/calib
+data/calib/*
+!data/calib/*.json
