@@ -264,3 +264,16 @@ def test_pair_captures_auto_pairs_by_shift_signature(tmp_path):
     assert len(common) >= 6
     dx = cl.reshape(-1, 2)[ia, 0] - cr.reshape(-1, 2)[ib, 0]
     assert dx.mean() > 50                    # positive disparity: left is truly left
+
+
+def test_is_cnc_pair_classifier():
+    """The rigidity test is dy SCATTER, not dy offset — a mount tilted 1-2 deg
+    off the travel axis gives a constant row drift that must still pair."""
+    from tools.pair_captures import is_cnc_pair
+
+    assert is_cnc_pair(474, -14.1, 1.3)          # the real rig's signature
+    assert is_cnc_pair(-480, 0.0, 0.5)           # reversed capture order
+    assert is_cnc_pair(56, 0.0, 0.2)             # small-baseline synthetic
+    assert not is_cnc_pair(474, -14.1, 20.0)     # scattered rows: board moved
+    assert not is_cnc_pair(200, 113, 3.0)        # diagonal nudge, not the axis
+    assert not is_cnc_pair(10, 0.0, 0.5)         # jitter, not a step

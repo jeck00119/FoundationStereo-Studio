@@ -22,6 +22,19 @@ import sys
 import numpy as np
 
 
+def is_cnc_pair(mdx: float, mdy: float, dy_std: float) -> bool:
+    """Is this consecutive-frame displacement a CNC-step stereo pair?
+
+    The signature of a rigid pure translation is CONSISTENCY, not zero offset:
+    dy scatter must be tiny (a rotated/reseated board spreads it over tens of
+    px), the shift must be dominated by x (the travel axis), and large enough
+    to not be jitter. A CONSTANT dy offset is expected and welcome — a camera
+    mounted 1–2° off the travel axis shows exactly that, and measuring it is
+    the point of the stereo calibration (an early version demanded |dy|<15 px
+    and rejected 7 of 8 genuine pairs from a real rig with a 1.7° mount)."""
+    return abs(mdx) > 30 and dy_std < 6 and abs(mdy) < 0.25 * abs(mdx)
+
+
 def main() -> None:
     import cv2
 
@@ -66,11 +79,7 @@ def main() -> None:
             d = pb[ib] - pa[ia]
             mdx, mdy = float(d[:, 0].mean()), float(d[:, 1].mean())
             dy_std = float(d[:, 1].std())
-            # a pure X translation preserves rows regardless of depth structure
-            # (dx varies with depth — that is the disparity — but dy must not).
-            # 30 px minimum shift: far above frame-to-frame jitter, far below any
-            # real CNC-step disparity (the rig's is ~hundreds of px).
-            if abs(mdx) > 30 and abs(mdy) < 15 and dy_std < 6:
+            if is_cnc_pair(mdx, mdy, dy_std):
                 pairs += 1
                 # camera at +X sees features at smaller x → that shot is the RIGHT eye
                 lf, rf = (fa, fb) if mdx < 0 else (fb, fa)
