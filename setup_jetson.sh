@@ -22,6 +22,20 @@ if [ -f /etc/nv_tegra_release ]; then
 else
     echo "warning: /etc/nv_tegra_release not found — is this a Jetson with JetPack flashed?"
 fi
+
+# JetPack generation gate. L4T R36.x = JetPack 6. Anything older (R35 =
+# JetPack 5: Ubuntu 20.04 / Python 3.8 / CUDA 11.4) cannot run this stack:
+# requirements' scipy>=1.11 and matplotlib>=3.8 need Python >=3.9, no Triton
+# wheels exist for JetPack 5 (Fast-FoundationStereo would fall back to eager
+# at ~4x memory on the very device where memory is the constraint), and the
+# Jetson torch index ships cp310 wheels only. Fail here, in seconds and with
+# the real reason, instead of minutes later inside pip with a misleading one.
+L4T_MAJOR=$(sed -n 's/^# R\([0-9][0-9]*\).*/\1/p' /etc/nv_tegra_release 2>/dev/null | head -1)
+if [ -n "$L4T_MAJOR" ] && [ "$L4T_MAJOR" -lt 36 ] && [ -z "$JETSON_SKIP_L4T_CHECK" ]; then
+    fail "L4T R$L4T_MAJOR = JetPack 5 or older; this port needs JetPack 6.x (L4T R36+).
+   Reflash the device with NVIDIA SDK Manager, picking JetPack 6.x, then re-run this
+   script. (To attempt an unsupported setup anyway: JETSON_SKIP_L4T_CHECK=1 ./setup_jetson.sh)"
+fi
 PY=python3
 $PY --version || fail "python3 not found"
 
@@ -42,17 +56,24 @@ PIP=".venv/bin/pip"
 $PIP install -q --upgrade pip wheel
 
 # ---- 4. torch for Jetson -----------------------------------------------------
-# Standard PyPI torch wheels are x86-only. The Jetson AI Lab index publishes
-# aarch64 CUDA wheels per JetPack release; cu126 matches JetPack 6.x. If this
-# index moves or your JetPack differs, see:
-#   https://pypi.jetson-ai-lab.dev   and   https://forums.developer.nvidia.com
-# for the current torch-for-JetPack instructions, install torch+torchvision
+# Standard PyPI torch wheels don't serve the Jetson iGPU (x86, or SBSA-server
+# aarch64). The Jetson AI Lab index publishes per-JetPack aarch64 CUDA wheels;
+# jp6/cu126 matches JetPack 6.x. The original host (pypi.jetson-ai-lab.dev)
+# went dark in 2026 — the .io devpi mirror below is live (torch 2.8–2.11,
+# cp310) and proxies PyPI, so torch's own deps (sympy, filelock, …) resolve
+# through it too. If it moves again, check forums.developer.nvidia.com for the
+# current torch-for-JetPack instructions, install torch+torchvision+triton
 # manually into .venv, then RE-RUN this script — it will skip ahead.
-say "Installing torch/torchvision (Jetson wheels)"
-if ! .venv/bin/python -c "import torch" 2>/dev/null; then
-    JETSON_INDEX="${JETSON_TORCH_INDEX:-https://pypi.jetson-ai-lab.dev/jp6/cu126}"
+#
+# triton rides along deliberately: it is what lets Fast-FoundationStereo run
+# its compiled cost-volume path (~4x less peak memory than the eager fallback
+# — decisive on a shared-memory 8 GB Orin). PyPI's triton has no Jetson build;
+# this index's does.
+say "Installing torch/torchvision/triton (Jetson wheels)"
+if ! .venv/bin/python -c "import torch, triton" 2>/dev/null; then
+    JETSON_INDEX="${JETSON_TORCH_INDEX:-https://pypi.jetson-ai-lab.io/jp6/cu126/+simple}"
     echo "using index: $JETSON_INDEX   (override with JETSON_TORCH_INDEX=...)"
-    $PIP install torch torchvision --index-url "$JETSON_INDEX" \
+    $PIP install torch torchvision triton --index-url "$JETSON_INDEX" \
         || fail "torch install failed — install Jetson torch manually (see note above), then re-run."
 fi
 .venv/bin/python - <<'EOF'
@@ -62,6 +83,11 @@ if torch.cuda.is_available():
     print(f"device: {torch.cuda.get_device_name(0)}")
 else:
     print("warning: CUDA not available — the JetPack/torch combination is wrong.")
+try:
+    import triton
+    print(f"triton {triton.__version__}")
+except Exception:
+    print("warning: triton missing — Fast-FoundationStereo will run eager at ~4x memory.")
 EOF
 
 # ---- 5. everything else ------------------------------------------------------

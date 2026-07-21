@@ -7,6 +7,10 @@
 #  - no flash-attn (no Jetson wheel; FoundationStereo falls back to standard
 #    attention per its FAQ)
 #  - no xformers (x86 wheel; not required by the studio pipeline)
+#  - triton is not listed here: PyPI has no Jetson build — setup_jetson.sh
+#    installs it from the Jetson wheel index next to torch (it powers
+#    Fast-FoundationStereo's compiled cost-volume path; without it the eager
+#    fallback needs ~4x the memory)
 #  - versions are floors, not pins — aarch64 wheel availability differs from
 #    x86, so let pip resolve within these bounds.
 

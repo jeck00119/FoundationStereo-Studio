@@ -54,6 +54,12 @@ You are likely here to finish the Linux port. Status: the app code is
 platform-neutral and `setup_jetson.sh` / `run_studio.sh` exist but are
 **untested on-device**. Do this:
 
+0. **JetPack 6.x (L4T R36+) is a hard prerequisite** — a JetPack 5 flash
+   (R35: Ubuntu 20.04, Python 3.8, CUDA 11.4, no Triton wheels) cannot run
+   this stack; `setup_jetson.sh` fails fast there with the reason. Reflash
+   with SDK Manager first. Verified 2026-07: the live torch index is
+   `pypi.jetson-ai-lab.io/jp6/cu126/+simple` (the old `.dev` host is dead)
+   and the PySide6 6.8.0.2 aarch64 Addons wheel DOES contain QtWebEngine.
 1. `git checkout orin`, run `./setup_jetson.sh`, and FIX WHAT BREAKS — the two
    expected weak points are the Jetson torch wheel index (override with
    `JETSON_TORCH_INDEX=...`) and PySide6/QtWebEngine aarch64 wheels (the 3D
