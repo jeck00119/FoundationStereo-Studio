@@ -192,11 +192,17 @@ def build_cloud(
     # -- denoise over the merged cloud, carrying every per-point array --
     if params.denoise and len(pts) > 0:
         tick(progress, "Denoising cloud…")
-        keep = denoise_mask(
-            pts, nb_neighbors=int(params.denoise_nb_points),
-            std_ratio=float(params.denoise_std),
-        )
-        pts, cols, ori, rel = pts[keep], cols[keep], ori[keep], rel[keep]
+        try:
+            keep = denoise_mask(
+                pts, nb_neighbors=int(params.denoise_nb_points),
+                std_ratio=float(params.denoise_std),
+            )
+        except ImportError:
+            # open3d has no wheel for every platform (Jetson aarch64 gaps) —
+            # a missing OPTIONAL filter must degrade, not kill the whole run
+            tick(progress, "Denoise skipped — open3d is not installed.")
+        else:
+            pts, cols, ori, rel = pts[keep], cols[keep], ori[keep], rel[keep]
 
     return CloudResult(points=pts, colors=cols, n=len(pts), origin=ori, reliable=rel)
 

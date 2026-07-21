@@ -150,3 +150,18 @@ def test_no_calibration_means_no_cloud():
     r = run_inference(FlatSceneBackend(), *_pair(), p)
     assert r.depth is None and r.K is None
     assert build_cloud(r, p) is None
+
+
+def test_denoise_degrades_without_open3d(monkeypatch):
+    """A missing open3d (Jetson aarch64 wheel gaps) must skip the denoise step,
+    not kill the run — the cloud comes back unfiltered."""
+    import studio.cloud as cloud_mod
+
+    def _no_o3d(*a, **k):
+        raise ImportError("No module named 'open3d'")
+
+    monkeypatch.setattr(cloud_mod, "denoise_mask", _no_o3d)
+    p = _params(scale=1.0, denoise=True)
+    r = run_inference(FlatSceneBackend(), *_pair(), p)
+    c = build_cloud(r, p)
+    assert c is not None and c.n == FULL_H * FULL_W    # everything kept, nothing crashed

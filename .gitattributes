@@ -1,2 +1,4 @@
 dinov2/ linguist-generated=true
 *.ipynb linguist-language=Python
+# shell scripts must stay LF even on Windows checkouts
+*.sh text eol=lf

@@ -64,6 +64,29 @@ Rule of thumb: this scene needs ≈ scale × 546 px of disparity — keep Max
 disparity above that (the app warns on saturation). The z-clip removes
 out-of-focus tall structures the optics cannot measure (DOF ≈ 1–3 mm).
 
+## Linux / Jetson Orin Nano
+
+The app code is platform-neutral; the launcher and environment differ:
+
+```
+git clone <this repo> && cd FoundationStereo
+./setup_jetson.sh          # one-shot: system libs, venv, Jetson torch wheels,
+                           # requirements, offscreen test-suite validation
+./run_studio.sh            # the run_studio.bat equivalent
+```
+
+Notes for the Orin Nano 8 GB (unified CPU+GPU memory):
+- **Fast-FoundationStereo is the practical model** — FoundationStereo ViT-L
+  does not fit. Keep Input scale modest and watch peak VRAM.
+- torch comes from the Jetson wheel index (standard PyPI torch is x86-only);
+  `setup_jetson.sh` handles it, override via `JETSON_TORCH_INDEX=...`.
+- No flash-attn on Jetson (FoundationStereo falls back automatically); open3d
+  is optional — without it the denoise step skips itself and PLY export
+  reports the missing dependency.
+- Your `data/calib/*.json` calibration is device-independent — copy it over.
+- If the 3D tab stays black, see the commented `QTWEBENGINE` lines in
+  `run_studio.sh`.
+
 ## Conventions worth knowing
 
 - `K.txt` files are metres (upstream convention); the app converts on load and
