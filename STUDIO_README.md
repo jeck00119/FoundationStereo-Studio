@@ -64,6 +64,27 @@ Rule of thumb: this scene needs ≈ scale × 546 px of disparity — keep Max
 disparity above that (the app warns on saturation). The z-clip removes
 out-of-focus tall structures the optics cannot measure (DOF ≈ 1–3 mm).
 
+## Working across machines (git)
+
+- `origin` = **github.com/jeck00119/FoundationStereo-Studio** (private) — your
+  repo, the one both machines sync through.
+- `upstream` = github.com/NVlabs/FoundationStereo — NVIDIA's repo, pull-only
+  (`git fetch upstream` to bring in their updates).
+- **`master` is the single source of truth for BOTH platforms** — the code is
+  platform-neutral, so fixes land here once. **`orin`** is the Jetson
+  bring-up branch: commit device-side experiments there, merge into `master`
+  whatever generalizes, and once bring-up is done the Orin runs `master` too.
+  (Two permanent per-platform branches would force every fix to be committed
+  twice — deliberately avoided.)
+
+On the Orin:
+
+```
+git clone https://github.com/jeck00119/FoundationStereo-Studio.git FoundationStereo
+cd FoundationStereo && git checkout orin
+./setup_jetson.sh && ./run_studio.sh
+```
+
 ## Linux / Jetson Orin Nano
 
 The app code is platform-neutral; the launcher and environment differ:
