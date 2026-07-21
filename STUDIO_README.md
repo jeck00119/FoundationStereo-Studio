@@ -66,7 +66,7 @@ out-of-focus tall structures the optics cannot measure (DOF ≈ 1–3 mm).
 
 ## Working across machines (git)
 
-- `origin` = **github.com/jeck00119/FoundationStereo-Studio** (private) — your
+- `origin` = **github.com/jeck00119/FoundationStereo-Studio** (public) — your
   repo, the one both machines sync through.
 - `upstream` = github.com/NVlabs/FoundationStereo — NVIDIA's repo, pull-only
   (`git fetch upstream` to bring in their updates).

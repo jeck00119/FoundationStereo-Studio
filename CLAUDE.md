@@ -29,7 +29,7 @@ read it first.
   `tools/verify_full_process.py` does it.
 - Git: `master` = single platform-neutral truth for BOTH machines; `orin` =
   Jetson bring-up scratch, merged back when things generalize. `origin` =
-  private jeck00119/FoundationStereo-Studio; `upstream` = NVlabs, pull-only.
+  jeck00119/FoundationStereo-Studio (public); `upstream` = NVlabs, pull-only.
 - User data lives in `data/` (git-ignored): `calib/`, `captures/`, `exports/`.
   Keep it out of `assets/` (upstream demo data — a stray `K.txt` there once
   silently hijacked calibration).
