@@ -66,7 +66,13 @@ platform-neutral and `setup_jetson.sh` / `run_studio.sh` exist but are
    view). open3d is optional (denoise self-skips without it).
 2. 8 GB is unified CPU+GPU memory: **Fast-FoundationStereo is the only
    practical model** (sibling clone `../Fast-FoundationStereo` + weights);
-   FoundationStereo ViT-L does not fit. Start at Input scale ≤ 0.30; if
+   FoundationStereo ViT-L does not fit. Clone from
+   github.com/NVlabs/Fast-FoundationStereo (public; default branch `master`).
+   Its `weights/` in git is an empty `.gitkeep` placeholder — the real
+   checkpoints come from the public Drive folder in its readme
+   (`drive.google.com/drive/folders/1HuTt7UIp7gQsMiDvJwVuWmKpvFzIIMap`,
+   try `gdown --folder`), one dir per run (e.g.
+   `weights/23-36-37/model_best_bp2_serialize.pth`, ~60 MB each). Start at Input scale ≤ 0.30; if
    Triton is unavailable, the adapter falls back to eager at ~4× memory —
    lower the scale further. A TensorRT backend (new adapter in
    `studio/backends/`, fixed input size, FP16 engine via upstream
