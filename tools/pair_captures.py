@@ -67,8 +67,10 @@ def main() -> None:
             mdx, mdy = float(d[:, 0].mean()), float(d[:, 1].mean())
             dy_std = float(d[:, 1].std())
             # a pure X translation preserves rows regardless of depth structure
-            # (dx varies with depth — that is the disparity — but dy must not)
-            if abs(mdx) > 50 and abs(mdy) < 15 and dy_std < 6:
+            # (dx varies with depth — that is the disparity — but dy must not).
+            # 30 px minimum shift: far above frame-to-frame jitter, far below any
+            # real CNC-step disparity (the rig's is ~hundreds of px).
+            if abs(mdx) > 30 and abs(mdy) < 15 and dy_std < 6:
                 pairs += 1
                 # camera at +X sees features at smaller x → that shot is the RIGHT eye
                 lf, rf = (fa, fb) if mdx < 0 else (fb, fa)

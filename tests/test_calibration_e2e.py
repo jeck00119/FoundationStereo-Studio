@@ -229,13 +229,13 @@ def test_pair_captures_auto_pairs_by_shift_signature(tmp_path):
     board = _charuco_board()
     bimg = board.generateImage((int(CH_SX * CH_SQ * PPMM), int(CH_SY * CH_SQ * PPMM)),
                                marginSize=0, borderBits=1)
-    poses = _charuco_poses()[:4]
+    poses = _charuco_poses()[:7]
     seq = 0
-    for k, (rvec, tvec) in enumerate(poses[:3]):        # 3 true pairs, order A,B
+    for k, (rvec, tvec) in enumerate(poses[:6]):        # 6 true pairs, order A,B
         for shot in (tvec, tvec - T_TRUE):              # A = left, B = right (camera +X)
             cv2.imwrite(str(tmp_path / f"cap{seq:03d}.jpg"), _charuco_view(bimg, rvec, shot))
             seq += 1
-    rvec, tvec = poses[3]                                # one stray single view
+    rvec, tvec = poses[6]                                # one stray single view
     cv2.imwrite(str(tmp_path / f"cap{seq:03d}.jpg"), _charuco_view(bimg, rvec, tvec))
 
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -252,7 +252,7 @@ def test_pair_captures_auto_pairs_by_shift_signature(tmp_path):
     out = tmp_path / "paired"
     lefts = sorted(p.name for p in out.glob("*_left.jpg"))
     rights = sorted(p.name for p in out.glob("*_right.jpg"))
-    assert len(lefts) == len(rights) == 3
+    assert len(lefts) == len(rights) == 6
     # left/right assignment: the LEFT eye sees the board shifted RIGHT (bigger x).
     # Verify optically on pose01: mean corner x(left) > mean corner x(right).
     det = cv2.aruco.CharucoDetector(board)
