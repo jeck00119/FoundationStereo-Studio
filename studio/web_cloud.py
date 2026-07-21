@@ -341,6 +341,12 @@ class WebCloudView(QWidget):
         replaced, so an in-flight cloud fetch can't lose its file."""
         if self._n == 0 or colors is None or len(colors) != self._n:
             return
+        if self._color_mode != "photo":
+            # the pushed colors land in the PHOTO channel, and recolor() only
+            # draws that channel in Photo mode — with Camera/Reliability selected
+            # the heatmap silently didn't show at all. Follow the combo's normal
+            # signal path so the JS mode and the label stay in step.
+            self.color_combo.setCurrentText("Photo")
         self._colors_seq += 1
         name = f"colors_{self._colors_seq}.bin"
         with open(os.path.join(self._root, name), "wb") as f:

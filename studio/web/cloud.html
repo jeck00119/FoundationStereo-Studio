@@ -126,7 +126,10 @@ const hidden=new Set();
 let _hoverXY=null, _hoverT=0, _hoverIdx=-1, _repick=true, _hoverPX=-1, _hoverPY=-1;
 const _pickTmp=new THREE.Vector3();
 
+let _builds=0;   // geometry rebuild counter — lets the harness tell a colors-only
+                 // recolor (count unchanged) from a full cloud rebuild
 function buildPoints(reset){
+  _builds++;
   if(points){ scene.remove(points); points.geometry.dispose(); }
   const g=new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(rawPos,3));
@@ -552,6 +555,32 @@ function syncBoxUniforms(){
 (function loop(){ requestAnimationFrame(loop); controls.update(); syncBoxUniforms();
   for(let i=0;i<analyzeMarkers.length;i++) scaleToPx(analyzeMarkers[i], 8);   // keep pick dots small
   updateHover(); renderer.render(scene,camera); })();
+
+// ---- debug/inspection hook ----
+// Everything above is MODULE-scoped, invisible to page().runJavaScript — which
+// evaluates in the global scope. This read-only snapshot (plus two tiny test
+// mutators) is the one sanctioned window into the module state, used by the
+// automated verification harness and for interactive debugging.
+window._dbg = () => JSON.stringify({
+  N, colorMode, hiMode, hiIsolate, gridStep, loadSeq, builds: _builds,
+  hasOri: !!rawOri, hasRel: !!rawRel, hasModel: !!rawModel,
+  hasPoints: !!points, stamp: points ? (points.userData.stamp ?? null) : null,
+  nBoxes: boxes.length, selBox, tcEnabled: tc.enabled, liveUnit, liveDec,
+  uSize: pmat.uniforms.uSize.value, uMode: pmat.uniforms.uMode.value,
+  uIsolate: pmat.uniforms.uIsolate.value, uBoxOn: pmat.uniforms.uBoxOn.value,
+  uBoxCx: pmat.uniforms.uBoxCenter.value.x,
+  uHRange: [pmat.uniforms.uHRange.value.x, pmat.uniforms.uHRange.value.y],
+  uTrim: [pmat.uniforms.uTrim.value.x, pmat.uniforms.uTrim.value.y],
+  camDist: camera.position.distanceTo(controls.target),
+  maxDist: controls.maxDistance,
+  pos0: rawPos ? rawPos[0] : null,
+  hint: hint.textContent,
+});
+window._dbgCol = i => (colorAttr
+  ? JSON.stringify([colorAttr.array[3*i], colorAttr.array[3*i+1], colorAttr.array[3*i+2]])
+  : null);
+window._dbgStamp = v => { if(points) points.userData.stamp = v; };
+window._dbgSetCam = (x,y,z,tx,ty,tz) => { camera.position.set(x,y,z); controls.target.set(tx,ty,tz); };
 
 // ---- bridge to Python (JS -> Python for box edits + ready) ----
 new QWebChannel(qt.webChannelTransport, (channel)=>{
