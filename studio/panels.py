@@ -453,6 +453,39 @@ class InputPanel(QWidget):
         self._ensure_rectifier()            # the image size is known now
         self._process_side(which)           # sets left_rgb/right_rgb + the thumbnail
         self.imagesChanged.emit()
+        self._warn_if_unrectified()         # raw pair in 'already rectified' mode?
+
+    def _warn_if_unrectified(self) -> None:
+        """Cheap row-alignment probe for 'already rectified' mode: if matched
+        features between the pair are VERTICALLY misaligned by more than a few
+        px, the pair is raw (this rig's raw pairs sit at ~19 px) — and the
+        stereo model, which assumes row-aligned input, would quietly produce a
+        garbage cloud. Saying so here turns a mystery into a mode switch."""
+        if self._rect_mode_on or self.left_rgb is None or self.right_rgb is None:
+            return
+        try:
+            import cv2
+            gl = cv2.cvtColor(self.left_rgb[::4, ::4], cv2.COLOR_RGB2GRAY)
+            gr = cv2.cvtColor(self.right_rgb[::4, ::4], cv2.COLOR_RGB2GRAY)
+            orb = cv2.ORB_create(500)
+            kl, dl = orb.detectAndCompute(gl, None)
+            kr, dr = orb.detectAndCompute(gr, None)
+            if dl is None or dr is None or len(kl) < 30 or len(kr) < 30:
+                return
+            m = sorted(cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True).match(dl, dr),
+                       key=lambda x: x.distance)[:120]
+            if len(m) < 25:
+                return
+            dy = float(np.median([kr[x.trainIdx].pt[1] - kl[x.queryIdx].pt[1]
+                                  for x in m])) * 4.0
+            if abs(dy) > 3.0:
+                self.notice.emit(
+                    f"⚠ This pair does not look rectified — features are vertically "
+                    f"misaligned by ~{abs(dy):.0f} px. If these are raw captures, switch "
+                    "Calibration to 'Raw — rectify with calibration' and load your "
+                    "calibration file (not k_rectified.txt).")
+        except Exception:   # noqa: BLE001 — a probe must never break image loading
+            pass
 
     def _autoload_ktxt(self, img_path: str) -> None:
         # A K.txt beside the image is authoritative for THIS pair — always load
@@ -550,6 +583,7 @@ class InputPanel(QWidget):
         self._refresh_calib_status()
         self._calib_changed()          # depth availability / hint may have changed
         self.imagesChanged.emit()      # the effective pair changed (rectified vs raw)
+        self._warn_if_unrectified()    # entering 'already rectified' with a raw pair?
 
     def _set_fields_readonly(self, ro: bool) -> None:
         """In raw mode the intrinsics are DERIVED from rectification, so the fields

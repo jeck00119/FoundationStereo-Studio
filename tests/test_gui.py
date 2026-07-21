@@ -220,3 +220,32 @@ def test_flat_ref_disabled_until_region_exists(qapp):
     p.set_flat_ref_checked(False)             # removed, and no region left
     p.set_flat_ref_available(False)
     assert not p.ref_btn.isEnabled()
+
+
+def test_unrectified_pair_warning(qapp, tmp_path):
+    """A raw pair (constant vertical misalignment) loaded in 'already rectified'
+    mode must warn; a row-aligned pair must not."""
+    import imageio.v2 as imageio
+    from studio.panels import InputPanel
+
+    rng = np.random.default_rng(4)
+    base = (rng.random((768, 1024)) * 255).astype(np.uint8)
+    import cv2
+    base = cv2.blur(base, (7, 7))                      # blobs ORB can latch onto
+    rgb = np.dstack([base] * 3)
+    misaligned = np.roll(np.roll(rgb, -120, axis=1), -19, axis=0)   # dx −120, dy −19
+    aligned = np.roll(rgb, -120, axis=1)                             # dx only
+
+    notices = []
+    for name, right in (("bad", misaligned), ("good", aligned)):
+        p = InputPanel()
+        p.notice.connect(notices.append)
+        lp, rp = tmp_path / f"{name}_l.png", tmp_path / f"{name}_r.png"
+        imageio.imwrite(str(lp), rgb)
+        imageio.imwrite(str(rp), right)
+        got = []
+        p.notice.connect(got.append)
+        p.load_image(str(lp), "left")
+        p.load_image(str(rp), "right")
+        warned = any("does not look rectified" in n for n in got)
+        assert warned == (name == "bad"), (name, got)

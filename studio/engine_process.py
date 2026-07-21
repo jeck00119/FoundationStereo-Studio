@@ -44,6 +44,21 @@ def main() -> None:
     from studio._streams import ensure_streams
     ensure_streams("fs_studio_engine")
 
+    # Windows: libraries in this worker spawn console child processes — Triton's
+    # ptxas.exe most visibly, once per kernel it compiles — and from a windowless
+    # parent every one of them FLASHES a black console at the user mid-run. This
+    # is a headless compute worker; no child of it ever needs a window.
+    import os as _os
+    if _os.name == "nt":
+        import subprocess as _sp
+        _init = _sp.Popen.__init__
+
+        def _no_window_init(self, *a, **kw):
+            kw["creationflags"] = kw.get("creationflags", 0) | _sp.CREATE_NO_WINDOW
+            return _init(self, *a, **kw)
+
+        _sp.Popen.__init__ = _no_window_init
+
     address = ("127.0.0.1", int(sys.argv[1]))
     authkey = bytes.fromhex(sys.argv[2])
     conn = Client(address, authkey=authkey)
