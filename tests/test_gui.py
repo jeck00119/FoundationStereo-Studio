@@ -199,3 +199,24 @@ def test_level_and_pin_buttons_new_homes(qapp):
     p.level_btn.setChecked(True)
     p.pin_btn.click()
     assert ("level", True) in fired and ("pin", None) in fired
+
+
+def test_flat_ref_disabled_until_region_exists(qapp):
+    """The zero button must not be pressable before there is a Region to zero
+    to — but an APPLIED reference always stays clickable so it can be removed."""
+    from studio.panels import ParamPanel
+
+    p = ParamPanel()
+    p.set_cloud_ready(True)
+    p.analyze_combo.setCurrentIndex(3)        # Region tool: button becomes visible...
+    assert p.ref_btn.isVisibleTo(p)
+    assert not p.ref_btn.isEnabled()          # ...but disabled - nothing measured yet
+    assert "Measure a Region first" in p.ref_btn.toolTip()
+    p.set_flat_ref_available(True)            # a region measurement landed
+    assert p.ref_btn.isEnabled()
+    p.set_flat_ref_checked(True)              # reference applied
+    p.set_flat_ref_available(False)           # picks reset - applied ref stays removable
+    assert p.ref_btn.isEnabled()
+    p.set_flat_ref_checked(False)             # removed, and no region left
+    p.set_flat_ref_available(False)
+    assert not p.ref_btn.isEnabled()

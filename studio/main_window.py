@@ -979,6 +979,7 @@ class MainWindow(QMainWindow):
         a mismatched frame and old markers can't float over a new cloud."""
         self._picked = []
         self._last_region = None        # its points are gone — can't zero from it anymore
+        self.param_panel.set_flat_ref_available(False)   # (an APPLIED ref stays removable)
         self._analyze_last = None       # nothing shown in the card now
         self.viewer.cloud_view.clear_analyze()
         self.param_panel.set_profile(None, None)
@@ -1063,6 +1064,7 @@ class MainWindow(QMainWindow):
                 cv.set_analyze_geom(markers=[list(A), list(B)], line=r["corners"])
                 self._highlight_used(r.get("used"))
                 self._last_region = r          # the raw result — what a flat-reference zeroes from
+                self.param_panel.set_flat_ref_available(True)   # now there IS something to zero to
                 self.param_panel.set_analyze_result(
                     "Region flatness", f"{r['rms']:.{dec}f}", u,
                     rows=[("max − min", f"{r['z_range']:.{dec}f} {u}"),
@@ -1097,6 +1099,8 @@ class MainWindow(QMainWindow):
             self._set_status("Flat reference set — board-referenced heights are now corrected.")
         else:
             self._z_offset_m = None
+            # un-applying may leave nothing to re-apply to (the region was reset)
+            self.param_panel.set_flat_ref_available(self._last_region is not None)
         self._update_ref_label()
         self._refresh_analyze()       # re-run whatever's shown (incl. a pin) with/without the correction
 

@@ -62,6 +62,12 @@ _BOXS_CFG = {
 }
 _BOX_DEFAULT_MM = 5.0     # a 5 mm cube — visible on a PCB without swallowing it
 
+_REF_TIP = (
+    "Measure a Region on a zone you KNOW is flat, then press this to ZERO to it: "
+    "its average height becomes an offset subtracted from every pin / point / region "
+    "height (correcting the cloud's systematic bow), and its max−min is reported as "
+    "the flatness uncertainty. Press again to remove the correction.")
+
 
 def np_to_qpixmap(arr: np.ndarray) -> QPixmap:
     a = np.ascontiguousarray(arr)
@@ -1156,11 +1162,7 @@ class ParamPanel(QWidget):
         self.ref_btn = QPushButton("Set flat reference (zero)")
         self.ref_btn.setObjectName("Toggle")
         self.ref_btn.setCheckable(True)
-        self.ref_btn.setToolTip(
-            "Measure a Region on a zone you KNOW is flat, then press this to ZERO to it: "
-            "its average height becomes an offset subtracted from every pin / point / region "
-            "height (correcting the cloud's systematic bow), and its max−min is reported as "
-            "the flatness uncertainty. Press again to remove the correction.")
+        self.ref_btn.setToolTip(_REF_TIP)
         self.ref_btn.toggled.connect(self.flatRefToggled)
         self.ref_btn.toggled.connect(lambda *_: self._sync_ref_visibility())
         self.sec_analyze.add(self.ref_btn)
@@ -1189,6 +1191,7 @@ class ParamPanel(QWidget):
         # just noise — start everything in its "tool off" state.
         self.isolate_btn.setVisible(False)
         self._sync_ref_visibility("")
+        self.set_flat_ref_available(False)   # nothing measured yet to zero to
         self.analyze_card.hide()
         # gated OFF until the window reports calibration / a cloud (it re-syncs
         # these on every state change via _sync_panel_gates)
@@ -1532,6 +1535,17 @@ class ParamPanel(QWidget):
         self.ref_btn.setChecked(bool(on))
         self.ref_btn.blockSignals(False)
         self._sync_ref_visibility()
+
+    def set_flat_ref_available(self, on: bool) -> None:
+        """The zero button can only ACT when a measured Region exists to zero to
+        — pressing it without one just bounced off with a status line. Disabled
+        (with the unlock step in the tooltip) until the window reports a region;
+        an APPLIED reference always stays clickable, so it can be removed."""
+        en = bool(on) or self.ref_btn.isChecked()
+        self.ref_btn.setEnabled(en)
+        self.ref_btn.setToolTip(_REF_TIP if en else
+            "Measure a Region first (Analyze → Region flatness · pick 2, on a "
+            "zone you KNOW is flat) — this button then zeroes every height to it.")
 
     # ------------------------------------------------------- state gating
     def set_calibration_ready(self, on: bool) -> None:
