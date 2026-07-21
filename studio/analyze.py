@@ -73,14 +73,22 @@ def _layer_mask(h, seed):
     return (h >= hs[lo]) & (h <= hs[hi])
 
 
-def surface_profile(points, A, B, n, c, corridor=None, nbins=60, isolate=False):
+def surface_profile(points, A, B, n, c, corridor=None, nbins=None, isolate=False):
     """Sample the surface HEIGHT along A→B (median in a thin corridor) — a cross
     section that follows the surface. Returns a dict with the profile (t,h), the
     surface-following 3D polyline, the slope angle vs the plane (robust best-fit),
     the height along it, the straight 3D distance and the in-plane length. None if
     too few points fall in the corridor. With ``isolate=True`` the corridor keeps only
     the height-connected level under the picked ends (so the profile follows the pin
-    heads, not the board glimpsed between them)."""
+    heads, not the board glimpsed between them).
+
+    ``nbins=None`` adapts the bin count to the corridor's point density
+    (~30 points per bin, 60–240 bins): a fixed 60 bins made each bin several
+    point-spacings wide on dense clouds, and the per-bin MEDIAN then shaved
+    more than a millimetre off narrow features (solder domes, pins). The
+    returned ``t``/``h`` cover EVERY bin, with ``h = NaN`` where a bin caught
+    no points — plot with connect='finite'; bridging the gaps with straight
+    lines invented surface where occlusion left none."""
     p = np.asarray(points, np.float64)
     A = np.asarray(A, np.float64); B = np.asarray(B, np.float64)
     n = np.asarray(n, np.float64); n = n / np.linalg.norm(n); c = np.asarray(c, np.float64)
@@ -112,28 +120,31 @@ def surface_profile(points, A, B, n, c, corridor=None, nbins=60, isolate=False):
         if tb.size < 5:
             return None
 
+    if nbins is None:
+        nbins = int(np.clip(tb.size // 30, 60, 240))   # ~30 pts/bin, capped
     edges = np.linspace(0.0, L, nbins + 1)
     which = np.clip(np.digitize(tb, edges) - 1, 0, nbins - 1)
-    centers = 0.5 * (edges[:-1] + edges[1:])
-    pt, pht = [], []
+    pt = 0.5 * (edges[:-1] + edges[1:])                # EVERY bin centre
+    pht = np.full(nbins, np.nan)
     for k in range(nbins):
         m = which == k
         if m.any():
-            pt.append(centers[k]); pht.append(float(np.median(hb[m])))
-    if len(pt) < 2:
+            pht[k] = float(np.median(hb[m]))
+    fin = np.isfinite(pht)
+    if int(fin.sum()) < 2:
         return None
-    pt = np.asarray(pt); pht = np.asarray(pht)
 
-    slope = float(np.polyfit(pt, pht, 1)[0])           # robust slope of the profile
+    slope = float(np.polyfit(pt[fin], pht[fin], 1)[0])  # slope over the MEASURED bins
     angle = float(np.degrees(np.arctan(slope)))
-    # surface-following polyline in 3D (plane frame → world)
-    px = au + pt * dirx
-    py = av + pt * diry
+    # surface-following polyline in 3D (plane frame → world) — measured bins only
+    px = au + pt[fin] * dirx
+    py = av + pt[fin] * diry
     poly = (c[None, :] + px[:, None] * u[None, :]
-            + py[:, None] * v[None, :] + pht[:, None] * n[None, :])
+            + py[:, None] * v[None, :] + pht[fin][:, None] * n[None, :])
+    hf = pht[fin]
     return {
         "t": pt, "h": pht, "poly": poly.astype(np.float32),
-        "angle": angle, "d_height": float(pht[-1] - pht[0]),
+        "angle": angle, "d_height": float(hf[-1] - hf[0]),
         "dist": float(np.linalg.norm(B - A)),
         "n_pts": int(pc.shape[0]),
         "used": pc.astype(np.float32),                 # corridor points measured (to highlight)

@@ -88,3 +88,32 @@ def test_surface_profile_recovers_known_ramp_angle():
     assert len(r["t"]) == len(r["h"]) >= 2
     assert 0.0 <= r["t"][0] and r["t"][-1] <= 16.0 + 1e-6   # bins live on the picked line
     assert r["poly"].shape[1] == 3                           # 3D polyline for the view
+
+
+def test_surface_profile_breaks_at_gaps_and_keeps_narrow_peaks():
+    """Occluded stretches must come back as NaN bins (no bridging), and the
+    adaptive bins must resolve a narrow tall feature a fixed 60 bins blurred."""
+    from studio.analyze import surface_profile
+
+    rng = _rng()
+    xy = rng.uniform(0, 30, (60000, 2))
+    z = np.full(len(xy), 10.0) + rng.normal(0, 0.01, len(xy))
+    pts = np.column_stack([xy[:, 0], xy[:, 1] - 15.0, z])
+    # a narrow 2 mm-tall ridge at x in [20, 20.6] (0.6 mm wide)
+    ridge = (pts[:, 0] > 20.0) & (pts[:, 0] < 20.6)
+    pts[ridge, 2] -= 2.0
+    # an occlusion hole: no points at all for x in [8, 11]
+    pts = pts[(pts[:, 0] < 8.0) | (pts[:, 0] > 11.0)]
+
+    A = np.array([0.5, 0.0, 10.0])
+    B = np.array([29.5, 0.0, 10.0])
+    r = surface_profile(pts, A, B, BOARD_N, BOARD_C)
+    assert r is not None
+    t, h = r["t"], r["h"]
+    assert len(t) == len(h) > 60                       # adaptive bins kicked in
+    hole = (t > 8.6) & (t < 9.9)                       # solidly inside the gap
+    assert hole.any() and np.all(~np.isfinite(h[hole]))   # NaN, not bridged
+    near_ridge = (t > 19.4) & (t < 21.1)
+    assert np.nanmax(h[near_ridge]) > 1.7              # the 2 mm ridge survives binning
+    flat = np.isfinite(h) & ((t < 7.5) | (t > 12.5)) & ((t < 19.5) | (t > 21.2))
+    assert abs(np.nanmedian(h[flat])) < 0.05           # board reads ~0

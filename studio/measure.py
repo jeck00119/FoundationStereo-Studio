@@ -266,22 +266,49 @@ def measure_box(points, box: MeasureBox, trim_pct: float = 2.0,
 def fit_plane(points):
     """Robust dominant-plane fit → (unit normal, centroid float64).
 
-    Two-pass PCA: fit a plane to everything, drop the points farthest from it
-    (the pins standing off the board, edges, flyers), then refit on the flat
-    majority — so it latches onto the BOARD surface, not the pins on top of it.
-    Deterministic (SVD + quantile, no RANSAC)."""
+    Deterministic multi-start: candidate planes are fitted in the cells of a
+    3×3 spatial grid (plus the global PCA plane), every candidate is scored by
+    its inlier count inside a COMMON tight band (3× the best candidate's MAD),
+    and the winner is refined by two trimmed re-fits. A single global fit —
+    however it is trimmed afterwards — can converge on a BLEND when a second
+    large plane at another tilt is present (a neighbouring module leaning into
+    frame dragged the board fit 8–11°): the blend's own residual spread then
+    swallows any trim threshold. Cell candidates are local, so most of them
+    ARE the board, and the tight common band makes the board's majority count
+    decide. No RANSAC — same input, same answer, always."""
     p = np.asarray(points, np.float64)
     if len(p) > 200_000:                         # deterministic subsample — keep it cheap
         p = p[np.linspace(0, len(p) - 1, 200_000).astype(np.int64)]
-    c = p.mean(0)
-    _, _, vt = np.linalg.svd(p - c, full_matrices=False)
-    n = vt[-1]
-    d = np.abs((p - c) @ n)
-    inl = p[d <= np.quantile(d, 0.75)]           # keep the flattest 75% (the board)
-    if len(inl) >= 3:
-        c = inl.mean(0)
-        _, _, vt = np.linalg.svd(inl - c, full_matrices=False)
-        n = vt[-1]
+
+    def _pca(pts):
+        ctr = pts.mean(0)
+        _, _, vt = np.linalg.svd(pts - ctr, full_matrices=False)
+        return vt[-1], ctr
+
+    n, c = _pca(p)
+    cands = [(n, c)]
+    lo, hi = p[:, :2].min(0), p[:, :2].max(0)
+    span = np.maximum(hi - lo, 1e-9)
+    cell = (np.clip(((p[:, 0] - lo[0]) / span[0]) * 3, 0, 2.999).astype(int) * 3
+            + np.clip(((p[:, 1] - lo[1]) / span[1]) * 3, 0, 2.999).astype(int))
+    for k in range(9):
+        m = cell == k
+        if int(m.sum()) >= 100:
+            cands.append(_pca(p[m]))
+
+    # common tight inlier band from the best-fitting candidate's spread
+    mads = [float(np.median(np.abs((p - ci) @ ni - np.median((p - ci) @ ni))))
+            for ni, ci in cands]
+    tau = 3.0 * max(min(mads), 1e-9)
+    best = int(np.argmax([int((np.abs((p - ci) @ ni - np.median((p - ci) @ ni))
+                               <= tau).sum()) for ni, ci in cands]))
+    n, c = cands[best]
+    for _ in range(2):                            # refine on the winner's inliers
+        h = (p - c) @ n
+        inl = p[np.abs(h - np.median(h)) <= tau]
+        if len(inl) < 3:
+            break
+        n, c = _pca(inl)
     return n / (np.linalg.norm(n) + 1e-12), c
 
 

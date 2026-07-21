@@ -99,3 +99,22 @@ def test_rotation_to_axis_maps_normal_onto_target():
     assert abs(np.linalg.det(R) - 1.0) < 1e-9
     np.testing.assert_allclose(rotation_to_axis((0, 0, -1), (0, 0, -1)),
                                np.eye(3), atol=1e-12)              # parallel → identity
+
+
+def test_fit_plane_resists_large_tilted_contaminant():
+    """A second big plane at another tilt (a neighbouring module leaning into
+    frame) must NOT drag the board fit — the shrinking-quantile rounds have to
+    converge on the dominant flat."""
+    from studio.measure import fit_plane
+
+    rng = np.random.default_rng(21)
+    board = np.column_stack([rng.uniform(-20, 20, 14000),
+                             rng.uniform(-20, 20, 14000),
+                             rng.normal(0, 0.03, 14000)])
+    xy = np.column_stack([rng.uniform(15, 25, 6000), rng.uniform(-20, 20, 6000)])
+    tilted = np.column_stack([xy[:, 0], xy[:, 1],
+                              3.0 + np.tan(np.deg2rad(8.0)) * xy[:, 0]
+                              + rng.normal(0, 0.03, 6000)])
+    n, c = fit_plane(np.vstack([board, tilted]))        # 30% contaminant
+    tilt = np.degrees(np.arccos(min(1.0, abs(n[2]))))
+    assert tilt < 1.0, f"board fit dragged {tilt:.2f} deg by the contaminant"

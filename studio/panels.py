@@ -1603,10 +1603,13 @@ class ParamPanel(QWidget):
         self.dev_btn.blockSignals(False)
 
     def set_profile(self, t, h) -> None:
-        if t is None or len(t) < 2:
+        if t is None or len(t) < 2 or not np.isfinite(np.asarray(h, float)).any():
             self._profile_curve.setData([], [])
         else:
-            self._profile_curve.setData(list(t), list(h))
+            # connect='finite': bins with no points are NaN, and the curve must
+            # BREAK there — bridging occluded stretches drew surface that isn't
+            self._profile_curve.setData(np.asarray(t, float), np.asarray(h, float),
+                                        connect="finite")
 
     def boxes_blob(self) -> dict:
         """The whole box set as plain JSON data (for QSettings)."""
