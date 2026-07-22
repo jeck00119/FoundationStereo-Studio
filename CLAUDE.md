@@ -72,11 +72,15 @@ agent needs to know:
    `gdown --folder`) is routinely quota-blocked for ~24 h. The reliable
    source is NVIDIA's official HF drop — files
    `huggingface.co/nvidia/c-fast-foundationstereo/resolve/main/{cfg.yaml,
-   model_best_bp2_serialize.pth}` into `weights/hf-c-release/` (a registry
-   entry lists it; it is not identifiable as any single Drive run). That
-   pickle predates some upstream args — the adapter backfills them
-   (`normalize`); extend `_NEWER_ARG_DEFAULTS` if a future "Missing key …"
-   appears at forward time.
+   model_best_bp2_serialize.pth}` into `weights/hf-c-release/`. Identified
+   2026-07-22 (registry comment has the full evidence chain): it is the
+   **v1.0 unpruned flagship** — 23-36-37 accuracy class, the author's
+   announced "commercial version" (issue #53) — so the BEST run is available
+   without Drive. Bit-identity with 23-36-37 remains unverified. That pickle
+   predates some upstream args — the adapter backfills them (`normalize`,
+   cf. upstream PR #41 fixing the same miss elsewhere); extend
+   `_NEWER_ARG_DEFAULTS` if a future "Missing key …" appears at forward
+   time.
 3. Compile behavior (the adapter pins inductor serial + a persistent cache
    dir `~/.cache/fsstudio-inductor`; the parallel worker pool dies on this
    device): the FIRST-ever compile on a fresh device runs >10 min with no
@@ -102,4 +106,8 @@ agent needs to know:
    `tools/verify_full_process.py`. Commit fixes to `orin`; merge to `master`
    what applies to both platforms. A TensorRT backend (fixed input size,
    FP16 engine via upstream `scripts/make_onnx.py` + trtexec) remains the
-   planned next step for speed.
+   planned next step for speed — community calibration for it (NVlabs issue
+   #43): pruned run 20-30-48 does 4–5 FPS at 448×640 PyTorch on an Orin
+   Nano Super, and some TRT versions fail the engine build
+   ("PWN(/Mul_1)" on TRT 10.7), so pin/verify the JetPack TRT version
+   before building that adapter.

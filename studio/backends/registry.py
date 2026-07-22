@@ -63,17 +63,26 @@ FAST_FS_REPO = os.path.join(os.path.dirname(REPO_ROOT), "Fast-FoundationStereo")
 # field naming the ViT-L *teacher* these were distilled FROM. The student is an
 # EdgeNeXt-based 14.6M-param network (model_card.md) — which the 59-68 MB
 # checkpoints confirm (14.6M × 4 B ≈ 58 MB); a real ViT-L is 3.1 GB.
+# hf-c-release = NVIDIA's own re-release on Hugging Face
+# (nvidia/c-fast-foundationstereo, NVIDIA Open Model Agreement) — the
+# "commercial version" the author announced in NVlabs/Fast-FoundationStereo
+# issue #53. Its model card pins the tier: "v1.0 … full capabilities,
+# UNPRUNED" — the pruned NAS variants are the faster Drive runs, so unpruned
+# is the flagship (23-36-37) accuracy class; same training corpus per the
+# card, top-of-family file size (67.8 MB of the 59–68 MB span), and measured
+# on-device speed in the heavy-run class (Orin bring-up, 2026-07-22). Listed
+# first: best accuracy AND the only run a fresh device can fetch without
+# fighting Drive's download quota —
+#   huggingface.co/nvidia/c-fast-foundationstereo/resolve/main/
+#     {cfg.yaml, model_best_bp2_serialize.pth}
+# Bit-identity with Drive's 23-36-37 is unverified, so it stays its own
+# entry rather than being renamed into that slot.
 _FAST_RUNS = [
-    ("23-36-37", "most accurate"),
+    ("hf-c-release", "unpruned flagship · official HF release"),
+    ("23-36-37", "most accurate (Drive)"),
     ("20-26-39", "balanced"),
     ("20-30-48", "fastest"),
     ("15-44-51", "extra run · not in the readme table"),
-    # NVIDIA's own HF drop (huggingface.co/nvidia/c-fast-foundationstereo,
-    # NVIDIA Open Model Agreement): same file format/size class as the Drive
-    # runs but NOT identifiable as any one of them from its cfg.yaml alone —
-    # listed as its own entry rather than guessed into a Drive run's name.
-    # Fetch: huggingface.co/nvidia/c-fast-foundationstereo/resolve/main/…
-    ("hf-c-release", "official Hugging Face drop"),
 ]
 
 
