@@ -127,6 +127,38 @@ FAST_FOUNDATION_STEREO = BackendSpec(
 )
 
 
+# Fast-FoundationStereo through TensorRT (Jetson-first; same weights, engines
+# derive from them lazily). Params here are BAKED into the engine at build
+# time — the adapter rebuilds (one-time, minutes, disk-cached per size) when
+# they change, which is why they still count as ordinary 'needs run' params.
+FAST_FS_TRT = BackendSpec(
+    key="fast_foundation_stereo_trt",
+    display_name="Fast-FoundationStereo · TensorRT",
+    adapter_module="studio.backends.fast_fs_trt",
+    repo_dir=FAST_FS_REPO,
+    python_exe=None,   # app venv; setup_jetson.sh links the system TRT bindings in
+    checkpoints=[_fast_ckpt(run, note) for run, note in _FAST_RUNS],
+    params=[
+        ParamSpec("valid_iters", "Refine iters", "choice", 8,
+                  options=[(8, "8 · trained default"), (4, "4 · faster")],
+                  tooltip="Refinement steps, baked into the engine at build time. "
+                          "Changing it builds a new engine once (minutes), then both "
+                          "variants sit cached on disk."),
+        ParamSpec("max_disp", "Max disparity", "slider", 192, 64, 416, 32, "{:.0f}", " px",
+                  tooltip="Disparity search range, baked into the engine at build time — "
+                          "changing it builds a new engine once (minutes). Memory and "
+                          "speed scale with it; 192 px covers downscaled pairs "
+                          "(rig rule: needed ≈ scale × 546 px)."),
+    ],
+    description="Fast-FoundationStereo compiled to a TensorRT FP16 engine (upstream's "
+                "single-ONNX export). The fast path on Jetson. Engines are device- and "
+                "size-specific: the FIRST run at a new size/disparity builds one — "
+                "several minutes, cached on disk for good — after which cold starts "
+                "take seconds (no per-boot warm-up like the PyTorch backend). "
+                "Research/evaluation use.",
+)
+
+
 # S²M² (ICCV 2025) — cloned beside this repo; its package lives under src/.
 S2M2_REPO = os.path.join(os.path.dirname(REPO_ROOT), "s2m2")
 S2M2_SRC = os.path.join(S2M2_REPO, "src")
@@ -162,7 +194,7 @@ S2M2 = BackendSpec(
 
 
 BACKENDS: dict[str, BackendSpec] = {
-    b.key: b for b in (FOUNDATION_STEREO, FAST_FOUNDATION_STEREO, S2M2)
+    b.key: b for b in (FOUNDATION_STEREO, FAST_FOUNDATION_STEREO, FAST_FS_TRT, S2M2)
 }
 DEFAULT_BACKEND = "foundation_stereo"
 

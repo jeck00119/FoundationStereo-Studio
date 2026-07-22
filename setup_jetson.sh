@@ -148,6 +148,23 @@ if [ -n "$QT_LIB_DIR" ] && [ ! -e "$QT_LIB_DIR/libwebp.so.6" ]; then
     rm -rf "$WEBP_TMP"
 fi
 
+# ---- 5c. TensorRT into the venv (the TRT backend) -----------------------------
+# JetPack ships TensorRT's python bindings in SYSTEM dist-packages only, and
+# this venv is deliberately isolated (no --system-site-packages: the system's
+# torch 2.3 must not shadow the jp6 torch). One surgical symlink exposes just
+# the tensorrt package — same interpreter (cp310), bindings resolve their
+# libnvinfer*.so via ldconfig. onnx is the export-time dep of the TRT backend
+# (studio/backends/fast_fs_trt.py builds engines lazily per input size).
+SYS_TRT="/usr/lib/python3.10/dist-packages/tensorrt"
+VENV_SP=$(ls -d .venv/lib/python*/site-packages | head -1)
+if [ -d "$SYS_TRT" ]; then
+    [ -e "$VENV_SP/tensorrt" ] || ln -sfn "$SYS_TRT" "$VENV_SP/tensorrt"
+    $PIP install -q onnx
+else
+    echo "warning: no system TensorRT python bindings found — the TensorRT
+backend will be unavailable (PyTorch backends are unaffected)."
+fi
+
 # ---- 6. validate -------------------------------------------------------------
 say "Validating (offscreen test suite)"
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest tests -q \
