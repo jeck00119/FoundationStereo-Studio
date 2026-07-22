@@ -169,51 +169,45 @@ class FastFsTrtBackend(StereoBackend):
 
     def _export_onnx(self, hp: int, wp: int, iters: int, max_disp: int,
                      onnx_path: str) -> None:
-        torch = self._torch
-        import core.foundation_stereo as _fs_module
-        from scripts.make_single_onnx import (
-            FastFoundationStereoSingleOnnx, _build_concat_volume_onnx,
-            _build_gwc_volume_onnx)
+        """Run the export in a SUBPROCESS that exits before the engine build.
 
-        tick(self._progress, f"TRT: exporting ONNX at {wp}×{hp} on the CPU "
-                             f"(one-time; slower but memory-safe)…")
-        model = torch.load(self.ckpt_path, map_location="cpu", weights_only=False)
-        backfill_pickled_args(model)          # HF drop predates args.normalize
-        model.args.max_disp = int(max_disp)
-        model.args.valid_iters = int(iters)
-        model.args.mixed_precision = False
-        # CPU ON PURPOSE — this is a lesson written in a reboot. The tracer
-        # keeps every intermediate of the eager cost volume alive; at rig
-        # sizes that is >5 GB, and on the GPU those pages are nvmap-PINNED —
-        # unswappable, unreclaimable. The first rig-size export exhausted the
-        # box until PID 1 missed the Tegra watchdog's 2-minute deadline and
-        # the hardware reset the system (2026-07-22 14:25). On the CPU the
-        # same bytes are ordinary swappable RAM and the 16 GB swapfile
-        # absorbs the spike; the one-time export merely takes minutes.
-        model = model.cpu().eval()
-        wrapper = FastFoundationStereoSingleOnnx(model).cpu().eval()
+        Two reboots'-worth of lessons in one method: the tracer's memory spike
+        (>5 GB at rig sizes) must be (a) CPU-side — on the GPU it is
+        nvmap-pinned and unswappable, which starved PID 1 until the Tegra
+        watchdog hard-reset the box — and (b) in a process that TERMINATES,
+        because even swappable spike memory leaves the system thrashing for
+        minutes, and trtexec launched into that storm found the unified-memory
+        GPU unable to hand out even 26 MB per tactic (Error 10 at the stem,
+        2026-07-22 14:48). A dead process gives every byte back at once.
+        """
+        tick(self._progress, f"TRT: exporting ONNX at {wp}×{hp} in a CPU "
+                             f"subprocess (one-time; takes minutes)…")
+        r = subprocess.run(
+            [sys.executable, "-m", "studio.backends.fast_fs_trt", "export",
+             self.ckpt_path, str(hp), str(wp), str(iters), str(max_disp),
+             onnx_path],
+            cwd=_FS_REPO, capture_output=True, text=True)
+        if r.returncode != 0 or not os.path.isfile(onnx_path):
+            tail = "\n".join((r.stdout + "\n" + r.stderr).strip().splitlines()[-12:])
+            raise RuntimeError(f"ONNX export subprocess failed — tail:\n{tail}")
 
-        # the same monkey-patches upstream's __main__ applies before tracing
-        _fs_module.normalize_image = lambda img: img
-        _fs_module.build_gwc_volume_optimized_pytorch1 = _build_gwc_volume_onnx
-        _fs_module.build_concat_volume_optimized_pytorch1 = _build_concat_volume_onnx
-
-        left = torch.randn(1, 3, hp, wp, device="cpu")
-        right = torch.randn(1, 3, hp, wp, device="cpu")
-        kwargs = dict(opset_version=17,
-                      input_names=["left_image", "right_image"],
-                      output_names=["disparity"],
-                      do_constant_folding=True)
-        try:
-            # torch ≥2.9 defaults to the dynamo exporter; upstream's export is
-            # written for the tracer. Older torch lacks the kwarg — retry bare.
-            torch.onnx.export(wrapper, (left, right), onnx_path,
-                              dynamo=False, **kwargs)
-        except TypeError:
-            torch.onnx.export(wrapper, (left, right), onnx_path, **kwargs)
-        finally:
-            del wrapper, model, left, right
-            torch.cuda.empty_cache()
+    def _wait_for_memory(self, min_avail_mb: int = 3000,
+                         timeout_s: int = 180) -> None:
+        """Block until the post-export swap storm drains before trtexec."""
+        t0 = time.time()
+        avail = 0
+        while time.time() - t0 < timeout_s:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemAvailable:"):
+                        avail = int(line.split()[1]) // 1024
+                        break
+            if avail >= min_avail_mb:
+                return
+            tick(self._progress, f"TRT: waiting for memory to settle "
+                                 f"({avail} MB free, want {min_avail_mb})…")
+            time.sleep(3)
+        # proceed regardless — trtexec's own error will be definitive
 
     def _build_engine(self, onnx_path: str, engine_path: str) -> None:
         exe = _find_trtexec()
@@ -247,6 +241,7 @@ class FastFsTrtBackend(StereoBackend):
             onnx_path = engine_path.replace(".engine", ".onnx")
             try:
                 self._export_onnx(hp, wp, iters, max_disp, onnx_path)
+                self._wait_for_memory()
                 self._build_engine(onnx_path, engine_path)
             finally:
                 # the .onnx is only scaffolding for trtexec; a failed build
@@ -302,3 +297,54 @@ class FastFsTrtBackend(StereoBackend):
 
 def make() -> StereoBackend:
     return FastFsTrtBackend()
+
+
+def _do_export(ckpt_path: str, hp: int, wp: int, iters: int, max_disp: int,
+               onnx_path: str) -> None:
+    """The actual export — runs in the throwaway subprocess (see
+    _export_onnx). CPU-only by design; must never touch CUDA."""
+    import torch
+    if FAST_REPO not in sys.path:
+        sys.path.insert(0, FAST_REPO)
+    import core.foundation_stereo as _fs_module
+    from scripts.make_single_onnx import (
+        FastFoundationStereoSingleOnnx, _build_concat_volume_onnx,
+        _build_gwc_volume_onnx)
+
+    torch.autograd.set_grad_enabled(False)
+    model = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    backfill_pickled_args(model)              # HF drop predates args.normalize
+    model.args.max_disp = int(max_disp)
+    model.args.valid_iters = int(iters)
+    model.args.mixed_precision = False
+    model = model.cpu().eval()
+    wrapper = FastFoundationStereoSingleOnnx(model).cpu().eval()
+
+    # the same monkey-patches upstream's __main__ applies before tracing
+    _fs_module.normalize_image = lambda img: img
+    _fs_module.build_gwc_volume_optimized_pytorch1 = _build_gwc_volume_onnx
+    _fs_module.build_concat_volume_optimized_pytorch1 = _build_concat_volume_onnx
+
+    left = torch.randn(1, 3, hp, wp, device="cpu")
+    right = torch.randn(1, 3, hp, wp, device="cpu")
+    kwargs = dict(opset_version=17,
+                  input_names=["left_image", "right_image"],
+                  output_names=["disparity"],
+                  do_constant_folding=True)
+    try:
+        # torch ≥2.9 defaults to the dynamo exporter; upstream's export is
+        # written for the tracer. Older torch lacks the kwarg — retry bare.
+        torch.onnx.export(wrapper, (left, right), onnx_path,
+                          dynamo=False, **kwargs)
+    except TypeError:
+        torch.onnx.export(wrapper, (left, right), onnx_path, **kwargs)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) == 8 and sys.argv[1] == "export":
+        _do_export(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]),
+                   int(sys.argv[5]), int(sys.argv[6]), sys.argv[7])
+        sys.exit(0)
+    print("usage: python -m studio.backends.fast_fs_trt export "
+          "<ckpt> <hp> <wp> <iters> <max_disp> <onnx_path>", file=sys.stderr)
+    sys.exit(2)
