@@ -47,7 +47,7 @@ sudo apt-get install -y -qq \
     libgl1 libegl1 libopengl0 libglib2.0-0 libfontconfig1 libdbus-1-3 \
     libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 \
     libxcb-shape0 libxcb-xinerama0 libnss3 libasound2 libxcomposite1 \
-    libxdamage1 libxrandr2 libxtst6
+    libxdamage1 libxrandr2 libxtst6 libminizip1
 
 # ---- 3. venv -----------------------------------------------------------------
 say "Creating .venv"
@@ -75,6 +75,24 @@ if ! .venv/bin/python -c "import torch, triton" 2>/dev/null; then
     echo "using index: $JETSON_INDEX   (override with JETSON_TORCH_INDEX=...)"
     $PIP install torch torchvision triton --index-url "$JETSON_INDEX" \
         || fail "torch install failed — install Jetson torch manually (see note above), then re-run."
+    # torch >=2.10 jp6 wheels link libcudss.so.0, which JetPack does not ship.
+    # PyPI's aarch64 nvidia-cudss wheel provides it — but --no-deps is load-
+    # bearing: the wheel's declared deps are SBSA (server-ARM) cublas/nvrtc
+    # 12.9 builds without Orin (sm_87) kernels, and once loaded under the same
+    # sonames they shadow JetPack's Tegra libs — cublasCreate then fails with
+    # CUBLAS_STATUS_ALLOC_FAILED on the first matmul. Without deps, cudss
+    # resolves cublas from the system (JetPack) via ldconfig, which is correct.
+    # 0.7.x is the CUDA-12.6-era line (0.8+ pairs with newer toolkits).
+    # The symlink matters too: torch's _preload_cuda_deps list has no cudss
+    # entry and libtorch_cuda's RUNPATH is bare $ORIGIN, so the pip nvidia/
+    # tree is invisible to the loader until the lib sits in torch/lib itself.
+    $PIP install -q --no-deps "nvidia-cudss-cu12==0.7.*" \
+        || fail "nvidia-cudss-cu12 install failed — torch >=2.10 cannot import without it."
+    CUDSS_LIB=$(find .venv/lib -path "*/nvidia/*" -name "libcudss.so.0" | head -1)
+    TORCH_LIB_DIR=$(dirname "$(find .venv/lib -name "libtorch_cuda.so" | head -1)")
+    [ -n "$CUDSS_LIB" ] && [ -n "$TORCH_LIB_DIR" ] \
+        || fail "could not locate libcudss.so.0 / torch lib dir for the RUNPATH link."
+    ln -sfr "$CUDSS_LIB" "$TORCH_LIB_DIR/libcudss.so.0"
 fi
 .venv/bin/python - <<'EOF'
 import torch
@@ -95,6 +113,28 @@ say "Installing app requirements"
 $PIP install -q -r requirements-jetson.txt \
     || echo "warning: some optional packages failed (open3d has no wheel for every
 python/aarch64 combo — the app runs without it; denoise + PLY export degrade)."
+
+# ---- 5b. QtWebEngine's pre-22.04 sonames -------------------------------------
+# The PySide6 6.8 aarch64 QtWebEngine binaries were built against an Ubuntu
+# 20.04-era sysroot: besides libminizip.so.1 (apt: libminizip1, in the list
+# above) they need libwebp.so.6 — which Ubuntu 22.04 does NOT ship (it moved to
+# libwebp7, a bumped soname). Symlinking .so.7 under the .so.6 name invites
+# missing-symbol crashes deep inside Chromium; instead drop the REAL focal
+# 0.6.1 lib into PySide6's private Qt/lib — that dir is every Qt lib's $ORIGIN
+# RUNPATH, so nothing outside this venv ever sees the old library.
+QT_LIB_DIR=$(ls -d .venv/lib/python*/site-packages/PySide6/Qt/lib 2>/dev/null | head -1)
+if [ -n "$QT_LIB_DIR" ] && [ ! -e "$QT_LIB_DIR/libwebp.so.6" ]; then
+    say "Fetching libwebp.so.6 (Ubuntu focal) for QtWebEngine"
+    WEBP_POOL="http://ports.ubuntu.com/pool/main/libw/libwebp/"
+    WEBP_DEB=$(curl -s "$WEBP_POOL" | grep -oE 'libwebp6_[^"]*arm64\.deb' | sort -uV | tail -1)
+    [ -n "$WEBP_DEB" ] || fail "no focal libwebp6 arm64 deb found at $WEBP_POOL"
+    WEBP_TMP=$(mktemp -d)
+    curl -s -o "$WEBP_TMP/$WEBP_DEB" "$WEBP_POOL$WEBP_DEB" \
+        && dpkg-deb -x "$WEBP_TMP/$WEBP_DEB" "$WEBP_TMP/x" \
+        && cp -a "$WEBP_TMP/x"/usr/lib/aarch64-linux-gnu/libwebp.so.6* "$QT_LIB_DIR/" \
+        || fail "libwebp6 fetch/extract failed — the 3D (QtWebEngine) view cannot load without it."
+    rm -rf "$WEBP_TMP"
+fi
 
 # ---- 6. validate -------------------------------------------------------------
 say "Validating (offscreen test suite)"
