@@ -1,13 +1,16 @@
 # FoundationStereo Studio
 
-A Windows desktop app for close-range stereo metrology (PCB / pin-height
-measurement) built on top of this FoundationStereo checkout. Upstream's own
-readme is `readme.md`; this file covers only the local additions.
+A desktop app for close-range stereo metrology (PCB / pin-height measurement)
+built on top of this FoundationStereo checkout. Runs on the Windows rig
+machine and on the Jetson Orin Nano (Linux port validated on-device
+2026-07-22). Upstream's own readme is `readme.md`; this file covers only the
+local additions.
 
 ## Run
 
 ```
-run_studio.bat            (console-less; logs land in %TEMP%\fs_studio_*.log)
+run_studio.bat            (Windows, console-less; logs land in %TEMP%\fs_studio_*.log)
+./run_studio.sh           (Linux / Jetson)
 ```
 or, with a console: `.venv\Scripts\python.exe -m studio.app`
 
@@ -26,10 +29,11 @@ the local Studio app built on top of it.
 | Entry | Whose | What it is |
 |---|---|---|
 | `studio/` | **local** | the app. Flat, descriptively-named modules: `main_window.py` (workflows) · `panels.py` (input/param panels) · `viewers.py`, `web_cloud.py`, `web/` (2D views + three.js 3D view) · `worker.py`/`engine_process.py` (GUI↔engine child) · `backends/` (FoundationStereo · Fast-FS · S²M²) · `infer.py`/`cloud.py` (shared pipeline) · `pairs.py` (Qt-free loading/pairing) · `measure.py`/`analyze.py`/`repeat.py`/`compare.py`/`batch.py` (metrology tools) |
-| `tools/` | **local** | CLIs + diagnostics: `calibrate.py` (checkerboard or ChArUco → calib.json; `--simple-lens` for near-distortion-free lenses) · `pair_captures.py` (verifies/names CNC A-B sessions) · `verify_3d_tab.py` (~30 s live 3D-view check) · `verify_full_process.py` (full-chain live check on the GPU) |
+| `tools/` | **local** | CLIs + diagnostics: `calibrate.py` (checkerboard or ChArUco → calib.json; `--simple-lens` for near-distortion-free lenses) · `pair_captures.py` (verifies/names CNC A-B sessions) · `verify_3d_tab.py` (~30 s live 3D-view check) · `verify_full_process.py` (full-chain live check on the GPU) · `bench_orin.py` / `bench_app_orin.py` (Jetson perf/memory harnesses behind the measured defaults) |
 | `tests/` | **local** | pytest suite (pipeline/calibration/measurement ground truth + GUI behavior): `.venv\Scripts\python.exe -m pytest tests` |
 | `data/` | **local, git-ignored** | your data: `calib/` (calibration files only) · `captures/` (capture sessions) · `exports/` (generated clouds/renders) |
-| `run_studio.bat`, `requirements.txt`, `STUDIO_README.md` | **local** | launcher · pinned env (torch/cu128 note in its header) · this file |
+| `run_studio.bat`, `requirements.txt`, `STUDIO_README.md` | **local** | Windows launcher · its pinned env (torch/cu128 note in its header) · this file |
+| `run_studio.sh`, `setup_jetson.sh`, `requirements-jetson.txt` | **local** | Jetson/Linux launcher · one-shot device setup (self-repairs the known JetPack 6 traps) · its env |
 | `core/`, `dinov2/`, `depth_anything/`, `scripts/`, `Utils.py`, `teaser/`, `docker/` | upstream | the FoundationStereo model + demos (scripts carry two small local fixes) — don't refactor |
 | `readme.md`, `readme_jetson.md`, `environment.yml`, `LICENSE` | upstream | upstream docs; `environment.yml` is upstream's conda env — **not** this app's environment (use `requirements.txt`) |
 | `assets/` | upstream | the bundled demo pair + its `K.txt` — keep your own data out of here |
@@ -58,8 +62,15 @@ for images already rectified offline — never for raw captures.
 
 ## Current rig quick-start (Basler acA4024 + 35 mm lens, ~200 mm distance)
 
-Raw—rectify + `data\calib\calib_provisional.json` (mm) · Input scale **0.50** ·
-Max disparity **416** · z-near **195** / z-far **208 mm** · Denoise on.
+Raw—rectify + `data\calib\calib_provisional.json` (mm) · z-near **195** /
+z-far **208 mm** · Denoise on · per-machine inference settings:
+
+- **Windows (12 GB card):** Input scale **0.50** · Max disparity **416**
+- **Orin Nano (8 GB):** Input scale **0.30** · Max disparity **192** —
+  measured 2026-07-22: 1.8 s/run, 2.6 GB RAM floor with the whole app up;
+  the Windows 0.50 · 416 profile OOM-kills this device (see the Jetson
+  section + CLAUDE.md for the full table)
+
 Rule of thumb: this scene needs ≈ scale × 546 px of disparity — keep Max
 disparity above that (the app warns on saturation). The z-clip removes
 out-of-focus tall structures the optics cannot measure (DOF ≈ 1–3 mm).
@@ -87,26 +98,41 @@ cd FoundationStereo && git checkout orin
 
 ## Linux / Jetson Orin Nano
 
-The app code is platform-neutral; the launcher and environment differ:
+Validated on-device 2026-07-22 (JetPack 6 / L4T R36.4.7): test suite 69/69,
+3D-view checks 44/44, full pipeline 22/22. The app code is platform-neutral;
+the launcher and environment differ:
 
 ```
 git clone <this repo> && cd FoundationStereo
 ./setup_jetson.sh          # one-shot: system libs, venv, Jetson torch wheels,
-                           # requirements, offscreen test-suite validation
+                           # requirements, offscreen test-suite validation —
+                           # self-repairs the known JetPack 6 traps (cudss,
+                           # ptxas, QtWebEngine's webp/minizip sonames)
 ./run_studio.sh            # the run_studio.bat equivalent
 ```
 
 Notes for the Orin Nano 8 GB (unified CPU+GPU memory):
 - **Fast-FoundationStereo is the practical model** — FoundationStereo ViT-L
-  does not fit. Keep Input scale modest and watch peak VRAM.
+  does not fit. Use **Input scale 0.30 · Max disparity 192** (measured
+  device default; 0.35 fits when needed, the Windows 0.50 · 416 profile gets
+  OOM-killed by the kernel).
+- Weights: the readme's Google Drive folder is routinely quota-blocked —
+  NVIDIA's official Hugging Face drop (`nvidia/c-fast-foundationstereo`) is
+  the reliable source; it appears in the model picker as `hf-c-release`.
+- The very first inference on a fresh device compiles for **>10 minutes**
+  with no visible progress (one-time; caches persist across reboots after
+  that). Each app session's first Run then takes ~30 s, later Runs ~2 s.
+- Benchmarking: switch to MAXN_SUPER + `jetson_clocks` first (see CLAUDE.md);
+  `tools/bench_orin.py` / `tools/bench_app_orin.py` reproduce the numbers.
 - torch comes from the Jetson wheel index (standard PyPI torch is x86-only);
   `setup_jetson.sh` handles it, override via `JETSON_TORCH_INDEX=...`.
 - No flash-attn on Jetson (FoundationStereo falls back automatically); open3d
   is optional — without it the denoise step skips itself and PLY export
   reports the missing dependency.
-- Your `data/calib/*.json` calibration is device-independent — copy it over.
+- Your `data/calib/*.json` calibration is device-independent (and ships in
+  git already — `data/calib/calib_provisional.json`).
 - If the 3D tab stays black, see the commented `QTWEBENGINE` lines in
-  `run_studio.sh`.
+  `run_studio.sh` (not needed on the dev kit's own display — verified).
 
 ## Conventions worth knowing
 
