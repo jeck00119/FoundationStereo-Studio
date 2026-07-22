@@ -94,6 +94,18 @@ if ! .venv/bin/python -c "import torch, triton" 2>/dev/null; then
         || fail "could not locate libcudss.so.0 / torch lib dir for the RUNPATH link."
     ln -sfr "$CUDSS_LIB" "$TORCH_LIB_DIR/libcudss.so.0"
 fi
+# The jp6 triton wheel bundles only a Blackwell (sm_100+) ptxas variant, so
+# the first kernel compile dies with "Cannot find ptxas". JetPack's own
+# cuda-nvcc package carries the real 12.6 one — link it where triton looks.
+# Outside the install-gate above on purpose: torch/triton IMPORT fine without
+# it, so a re-run must be able to repair this even when the gate skips.
+TRITON_BIN_DIR=$(ls -d .venv/lib/python*/site-packages/triton/backends/nvidia/bin 2>/dev/null | head -1)
+if [ -n "$TRITON_BIN_DIR" ] && [ ! -e "$TRITON_BIN_DIR/ptxas" ]; then
+    [ -x /usr/local/cuda/bin/ptxas ] \
+        || fail "no ptxas at /usr/local/cuda/bin (is cuda-nvcc-12-6 installed?) — triton cannot compile without it."
+    ln -sf /usr/local/cuda/bin/ptxas "$TRITON_BIN_DIR/ptxas"
+fi
+
 .venv/bin/python - <<'EOF'
 import torch
 print(f"torch {torch.__version__}  CUDA available: {torch.cuda.is_available()}")
