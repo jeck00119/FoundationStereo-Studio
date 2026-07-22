@@ -46,6 +46,39 @@ _MEAN = np.array([123.675, 116.28, 103.53], dtype=np.float32)
 _STD = np.array([58.395, 57.12, 57.375], dtype=np.float32)
 
 
+def _log_last_line(path: str, maxread: int = 8192) -> str:
+    """Last non-empty line of a growing log, cheaply (tail of the file)."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - maxread))
+            lines = [ln for ln in f.read().decode("utf-8", "replace").splitlines()
+                     if ln.strip()]
+        return lines[-1][-140:] if lines else "(no output yet)"
+    except OSError:
+        return "(log unreadable)"
+
+
+def _log_tail(path: str, n: int = 15) -> str:
+    try:
+        with open(path, "r", errors="replace") as f:
+            return "\n".join(f.read().splitlines()[-n:])
+    except OSError:
+        return "(log unreadable)"
+
+
+def _proc_rss_mb(pid: int) -> int:
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) // 1024
+    except OSError:
+        pass
+    return 0
+
+
 def _find_trtexec() -> Optional[str]:
     # JetPack installs trtexec outside PATH; check its home first.
     fixed = "/usr/src/tensorrt/bin/trtexec"
@@ -180,16 +213,18 @@ class FastFsTrtBackend(StereoBackend):
         GPU unable to hand out even 26 MB per tactic (Error 10 at the stem,
         2026-07-22 14:48). A dead process gives every byte back at once.
         """
+        log_path = onnx_path + ".export.log"
         tick(self._progress, f"TRT: exporting ONNX at {wp}×{hp} in a CPU "
-                             f"subprocess (one-time; takes minutes)…")
-        r = subprocess.run(
-            [sys.executable, "-m", "studio.backends.fast_fs_trt", "export",
-             self.ckpt_path, str(hp), str(wp), str(iters), str(max_disp),
-             onnx_path],
-            cwd=_FS_REPO, capture_output=True, text=True)
-        if r.returncode != 0 or not os.path.isfile(onnx_path):
-            tail = "\n".join((r.stdout + "\n" + r.stderr).strip().splitlines()[-12:])
-            raise RuntimeError(f"ONNX export subprocess failed — tail:\n{tail}")
+                             f"subprocess (one-time; takes minutes; "
+                             f"log: {log_path})…")
+        cmd = [sys.executable, "-m", "studio.backends.fast_fs_trt", "export",
+               self.ckpt_path, str(hp), str(wp), str(iters), str(max_disp),
+               onnx_path]
+        rc = self._run_narrated(cmd, log_path, cwd=_FS_REPO, label="export",
+                                rss_of_child=True)
+        if rc != 0 or not os.path.isfile(onnx_path):
+            raise RuntimeError(
+                f"ONNX export subprocess failed — tail:\n{_log_tail(log_path)}")
 
     def _wait_for_memory(self, min_avail_mb: int = 3000,
                          timeout_s: int = 180) -> None:
@@ -215,9 +250,6 @@ class FastFsTrtBackend(StereoBackend):
             raise RuntimeError(
                 "trtexec not found (looked in /usr/src/tensorrt/bin and PATH) — "
                 "is the JetPack TensorRT package installed?")
-        tick(self._progress, "TRT: building the FP16 engine — several minutes, "
-                             "one-time for this size; cached on disk afterwards…")
-        t0 = time.time()
         # workspace cap: on 8 GB unified memory an uncapped builder times
         # tactics against ALL free device memory and can OOM the box at rig
         # sizes; 3 GiB keeps builds safe and costs at most a marginal tactic.
@@ -225,15 +257,51 @@ class FastFsTrtBackend(StereoBackend):
         # (its banner shows 'workspace: 0.00293 MiB') and every tactic dies
         # with 'insufficient memory' in seconds — two chain runs were lost to
         # that suffix before trtexec's config echo gave it away.
-        r = subprocess.run(
-            [exe, f"--onnx={onnx_path}", f"--saveEngine={engine_path}", "--fp16",
-             "--memPoolSize=workspace:3072"],
-            capture_output=True, text=True)
-        if r.returncode != 0 or not os.path.isfile(engine_path):
-            tail = "\n".join((r.stdout + "\n" + r.stderr).strip().splitlines()[-15:])
+        cmd = [exe, f"--onnx={onnx_path}", f"--saveEngine={engine_path}",
+               "--fp16", "--memPoolSize=workspace:3072"]
+        # Rig-size builds run 1.5-2 h at TRT's default optimization level 3.
+        # FS_TRT_OPT_LEVEL=2 (or 1) trades a few percent of engine speed for a
+        # drastically shorter build — the right call for feasibility probes;
+        # rebuild the winning config at full level by unsetting it (the engine
+        # filename does not encode the level: delete the engine to rebuild).
+        opt = os.environ.get("FS_TRT_OPT_LEVEL", "").strip()
+        if opt:
+            cmd.append(f"--builderOptimizationLevel={opt}")
+        log_path = engine_path + ".build.log"
+        tick(self._progress, f"TRT: building the FP16 engine (opt level "
+                             f"{opt or 'default'}) — one-time for this size; "
+                             f"live log: {log_path}")
+        t0 = time.time()
+        rc = self._run_narrated(cmd, log_path, cwd=None, label="build")
+        if rc != 0 or not os.path.isfile(engine_path):
             raise RuntimeError(f"trtexec failed after {time.time() - t0:.0f}s — "
-                               f"log tail:\n{tail}")
-        tick(self._progress, f"TRT: engine built in {time.time() - t0:.0f}s.")
+                               f"log tail:\n{_log_tail(log_path)}")
+        tick(self._progress, f"TRT: engine built in {time.time() - t0:.0f}s "
+                             f"(build log kept beside it).")
+
+    def _run_narrated(self, cmd, log_path: str, cwd, label: str,
+                      rss_of_child: bool = False) -> int:
+        """Run a long subprocess with its output streamed to a tail-able file
+        and a progress tick every minute — hours of silence are how you end up
+        ssh-ing into a box wondering if anything is alive."""
+        with open(log_path, "w") as lf:
+            lf.write("$ " + " ".join(cmd) + "\n")
+            lf.flush()
+            p = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT,
+                                 cwd=cwd, text=True)
+            t0 = time.time()
+            next_beat = 60.0
+            while p.poll() is None:
+                time.sleep(5)
+                el = time.time() - t0
+                if el >= next_beat:
+                    next_beat = el + 60.0
+                    note = _log_last_line(log_path)
+                    if rss_of_child:
+                        note = f"rss {_proc_rss_mb(p.pid)} MB · {note}"
+                    tick(self._progress,
+                         f"TRT {label}: {el / 60:.0f} min — {note}")
+            return p.returncode
 
     def _ensure_runner(self, hp: int, wp: int, iters: int, max_disp: int) -> None:
         key = (hp, wp, iters, max_disp)
