@@ -175,22 +175,31 @@ class FastFsTrtBackend(StereoBackend):
             FastFoundationStereoSingleOnnx, _build_concat_volume_onnx,
             _build_gwc_volume_onnx)
 
-        tick(self._progress, f"TRT: exporting ONNX at {wp}×{hp} (one-time)…")
+        tick(self._progress, f"TRT: exporting ONNX at {wp}×{hp} on the CPU "
+                             f"(one-time; slower but memory-safe)…")
         model = torch.load(self.ckpt_path, map_location="cpu", weights_only=False)
         backfill_pickled_args(model)          # HF drop predates args.normalize
         model.args.max_disp = int(max_disp)
         model.args.valid_iters = int(iters)
         model.args.mixed_precision = False
-        model = model.cuda().eval()
-        wrapper = FastFoundationStereoSingleOnnx(model).cuda().eval()
+        # CPU ON PURPOSE — this is a lesson written in a reboot. The tracer
+        # keeps every intermediate of the eager cost volume alive; at rig
+        # sizes that is >5 GB, and on the GPU those pages are nvmap-PINNED —
+        # unswappable, unreclaimable. The first rig-size export exhausted the
+        # box until PID 1 missed the Tegra watchdog's 2-minute deadline and
+        # the hardware reset the system (2026-07-22 14:25). On the CPU the
+        # same bytes are ordinary swappable RAM and the 16 GB swapfile
+        # absorbs the spike; the one-time export merely takes minutes.
+        model = model.cpu().eval()
+        wrapper = FastFoundationStereoSingleOnnx(model).cpu().eval()
 
         # the same monkey-patches upstream's __main__ applies before tracing
         _fs_module.normalize_image = lambda img: img
         _fs_module.build_gwc_volume_optimized_pytorch1 = _build_gwc_volume_onnx
         _fs_module.build_concat_volume_optimized_pytorch1 = _build_concat_volume_onnx
 
-        left = torch.randn(1, 3, hp, wp, device="cuda")
-        right = torch.randn(1, 3, hp, wp, device="cuda")
+        left = torch.randn(1, 3, hp, wp, device="cpu")
+        right = torch.randn(1, 3, hp, wp, device="cpu")
         kwargs = dict(opset_version=17,
                       input_names=["left_image", "right_image"],
                       output_names=["disparity"],
