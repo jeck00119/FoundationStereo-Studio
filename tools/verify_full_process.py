@@ -9,6 +9,7 @@ model-load (~4–20 s) plus one inference. Run after pipeline-level changes:
 """
 import os
 import sys
+import tempfile
 
 import numpy as np
 
@@ -158,7 +159,9 @@ if c is not None:
 
 # ---- 5. export --------------------------------------------------------------
 if r is not None:
-    out = os.path.join(os.environ.get("TEMP", "."), "fs_verify_export")
+    # tempfile, not os.environ["TEMP"]: TEMP is a Windows-ism — on Linux the
+    # fallback silently dumped fs_verify_export/ into the repo root.
+    out = os.path.join(tempfile.gettempdir(), "fs_verify_export")
     os.makedirs(out, exist_ok=True)
     import imageio.v2 as imageio
     from studio.engine import StereoEngine
