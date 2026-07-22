@@ -221,9 +221,13 @@ class FastFsTrtBackend(StereoBackend):
         # workspace cap: on 8 GB unified memory an uncapped builder times
         # tactics against ALL free device memory and can OOM the box at rig
         # sizes; 3 GiB keeps builds safe and costs at most a marginal tactic.
+        # BARE NUMBER = MiB. Writing "3072MiB" hands trtexec a 3072-BYTE pool
+        # (its banner shows 'workspace: 0.00293 MiB') and every tactic dies
+        # with 'insufficient memory' in seconds — two chain runs were lost to
+        # that suffix before trtexec's config echo gave it away.
         r = subprocess.run(
             [exe, f"--onnx={onnx_path}", f"--saveEngine={engine_path}", "--fp16",
-             "--memPoolSize=workspace:3072MiB"],
+             "--memPoolSize=workspace:3072"],
             capture_output=True, text=True)
         if r.returncode != 0 or not os.path.isfile(engine_path):
             tail = "\n".join((r.stdout + "\n" + r.stderr).strip().splitlines()[-15:])
@@ -240,14 +244,17 @@ class FastFsTrtBackend(StereoBackend):
             os.makedirs(os.path.dirname(engine_path), exist_ok=True)
             onnx_path = engine_path.replace(".engine", ".onnx")
             try:
-                self._export_onnx(hp, wp, iters, max_disp, onnx_path)
+                # a leftover .onnx from a failed build is valid (its filename
+                # pins the config) — reuse it instead of re-paying the
+                # multi-minute export on every build retry
+                if not os.path.isfile(onnx_path):
+                    self._export_onnx(hp, wp, iters, max_disp, onnx_path)
                 self._wait_for_memory()
                 self._build_engine(onnx_path, engine_path)
+                # success: the .onnx was only scaffolding for trtexec
+                os.remove(onnx_path)
             finally:
-                # the .onnx is only scaffolding for trtexec; a failed build
-                # must not leave half-artifacts that mask the error next run
-                if os.path.isfile(onnx_path):
-                    os.remove(onnx_path)
+                # never leave a half-written engine that would mask the error
                 if os.path.isfile(engine_path) and os.path.getsize(engine_path) == 0:
                     os.remove(engine_path)
         # one engine resident at a time — each holds weights + workspace on an
