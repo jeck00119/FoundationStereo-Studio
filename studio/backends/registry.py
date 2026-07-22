@@ -68,6 +68,12 @@ _FAST_RUNS = [
     ("20-26-39", "balanced"),
     ("20-30-48", "fastest"),
     ("15-44-51", "extra run · not in the readme table"),
+    # NVIDIA's own HF drop (huggingface.co/nvidia/c-fast-foundationstereo,
+    # NVIDIA Open Model Agreement): same file format/size class as the Drive
+    # runs but NOT identifiable as any one of them from its cfg.yaml alone —
+    # listed as its own entry rather than guessed into a Drive run's name.
+    # Fetch: huggingface.co/nvidia/c-fast-foundationstereo/resolve/main/…
+    ("hf-c-release", "official Hugging Face drop"),
 ]
 
 
