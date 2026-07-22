@@ -90,6 +90,22 @@ class FastFoundationStereoBackend(StereoBackend):
         tick(progress, "Loading Fast-FoundationStereo weights…")
         # the whole model is pickled; unpickling needs the Fast-FS classes on the path
         model = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        # The pickled model carries its own OmegaConf `args`, so a checkpoint
+        # serialized before an upstream arg existed only explodes at FORWARD
+        # time with "Missing key …" (NVIDIA's HF drop lacks `normalize`; the
+        # Drive runs have it). Backfill absent args with upstream's own
+        # defaults — the consuming functions default identically
+        # (core/submodule.py: build_gwc_volume_*(…, normalize=True)) — after
+        # lifting OmegaConf's struct lock, which forbids new keys on pickles.
+        _NEWER_ARG_DEFAULTS = {"normalize": True}
+        try:
+            from omegaconf import OmegaConf
+            OmegaConf.set_struct(model.args, False)
+        except Exception:   # plain-namespace args: setattr below just works
+            pass
+        for _k, _v in _NEWER_ARG_DEFAULTS.items():
+            if not hasattr(model.args, _k):
+                setattr(model.args, _k, _v)
         # NOTE: max_disp is set per-run in disparity() from model_params (default 192,
         # the README's runtime default). The serialized model bakes max_disp=416 (its
         # TRAINED range) — using that at inference makes the eager cost volume ~2×
