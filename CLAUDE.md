@@ -103,8 +103,9 @@ agent needs to know:
    `/etc/nvpmodel/nvpmodel_p3767_0003_super.conf`, then `nvpmodel -m 2`
    (MAXN_SUPER) + `jetson_clocks` before benchmarking.
 6. Validate with `pytest tests` (offscreen: `QT_QPA_PLATFORM=offscreen`), then
-   `tools/verify_full_process.py`. Commit fixes to `orin`; merge to `master`
-   what applies to both platforms. A TensorRT backend (fixed input size,
+   `tools/verify_full_process.py`. Bring-up is merged — day-to-day work
+   lands on `master` (both machines run it); re-branch `orin` only for
+   risky device experiments. A TensorRT backend (fixed input size,
    FP16 engine via upstream `scripts/make_onnx.py` + trtexec) remains the
    planned next step for speed — community calibration for it (NVlabs issue
    #43): pruned run 20-30-48 does 4–5 FPS at 448×640 PyTorch on an Orin

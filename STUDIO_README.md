@@ -88,11 +88,12 @@ out-of-focus tall structures the optics cannot measure (DOF ≈ 1–3 mm).
   (Two permanent per-platform branches would force every fix to be committed
   twice — deliberately avoided.)
 
-On the Orin:
+On the Orin (bring-up is done and merged — the Orin runs `master` like the
+Windows machine; `orin` is only re-branched for risky device experiments):
 
 ```
 git clone https://github.com/jeck00119/FoundationStereo-Studio.git FoundationStereo
-cd FoundationStereo && git checkout orin
+cd FoundationStereo
 ./setup_jetson.sh && ./run_studio.sh
 ```
 
@@ -118,7 +119,10 @@ Notes for the Orin Nano 8 GB (unified CPU+GPU memory):
   OOM-killed by the kernel).
 - Weights: the readme's Google Drive folder is routinely quota-blocked —
   NVIDIA's official Hugging Face drop (`nvidia/c-fast-foundationstereo`) is
-  the reliable source; it appears in the model picker as `hf-c-release`.
+  the reliable source; it appears in the model picker as `hf-c-release` and
+  is the **v1.0 unpruned flagship**, i.e. the family's best-accuracy tier
+  (evidence chain in `studio/backends/registry.py`). The Drive runs add
+  only the faster/pruned variants.
 - The very first inference on a fresh device compiles for **>10 minutes**
   with no visible progress (one-time; caches persist across reboots after
   that). Each app session's first Run then takes ~30 s, later Runs ~2 s.
