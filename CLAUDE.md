@@ -99,16 +99,34 @@ agent needs to know:
    Orin ≈ 7.7× slower than the 3060 at identical config (2.68 s vs 0.35 s at
    932×806·192) with byte-identical 1.49 GB GPU peak — the compiled cost
    volume behaves the same everywhere.
-5. Power: stock nvpmodel.conf lacks the Super modes — repoint the symlink to
-   `/etc/nvpmodel/nvpmodel_p3767_0003_super.conf`, then `nvpmodel -m 2`
-   (MAXN_SUPER) + `jetson_clocks` before benchmarking.
-6. Validate with `pytest tests` (offscreen: `QT_QPA_PLATFORM=offscreen`), then
-   `tools/verify_full_process.py`. Bring-up is merged — day-to-day work
-   lands on `master` (both machines run it); re-branch `orin` only for
-   risky device experiments. A TensorRT backend (fixed input size,
-   FP16 engine via upstream `scripts/make_onnx.py` + trtexec) remains the
-   planned next step for speed — community calibration for it (NVlabs issue
-   #43): pruned run 20-30-48 does 4–5 FPS at 448×640 PyTorch on an Orin
-   Nano Super, and some TRT versions fail the engine build
-   ("PWN(/Mul_1)" on TRT 10.7), so pin/verify the JetPack TRT version
-   before building that adapter.
+5. Power: stock nvpmodel.conf lacks the Super modes AND this board's
+   mis-flashed DTB (no 'super' compatible marker) makes nvpower.sh RELINK
+   the non-super conf at every boot — the enabled oneshot unit
+   `fsstudio-maxn-super.service` re-applies MAXN_SUPER after it. Run
+   `jetson_clocks` manually before benchmarking (not persisted, by design).
+   The Tegra hardware watchdog resets the box if PID 1 stalls 2 min — that
+   is what a pinned-memory exhaustion looks like from the outside (it
+   happened once; the TRT export architecture below is the consequence).
+6. The TensorRT backend (`studio/backends/fast_fs_trt.py`, upstream's
+   single-ONNX export + trtexec FP16) is BUILT and is the **Orin default**
+   since 2026-07-22. At the device config (0.30 · 192, rig-sized pair):
+   median |Δdisp| vs the torch backend 0.034 px (p95 0.156), valid 100%,
+   **1.30 s vs 1.93 s warm, ~5 s cold start, no warm-up ever**. Engines
+   cache per (padded size · iters · max_disp) at `weights/<run>/trt/` —
+   one-time ~1¾ h build per config at default opt level (FS_TRT_OPT_LEVEL=2
+   for several-fold faster probe builds), narrated by minute heartbeats +
+   a kept `.build.log`. Exports run CPU-side in a throwaway subprocess
+   (GPU-side tracing pins >5 GB — that is the watchdog-reset above).
+   **Measured hard wall: single-ONNX TRT cannot exceed scale 0.30 on 8 GB**
+   — at ≥0.35·224 trtexec dies at `PWN(/Mul_1)`, the cost-volume multiply,
+   demanding 4.1–4.7 GB device memory for materialized ONNX-op volumes
+   (NVlabs issue #43's mystery 'PWN(/Mul_1)' report is this same wall).
+   The road past 0.30 on-device is upstream's TRT **plugin** path (PR #55:
+   fused GWC-volume kernel, plugin .so build) — the designated next project
+   if >0.30 accuracy is ever needed on the Orin; until then 0.35+ belongs
+   to the Windows machine.
+7. Validate with `pytest tests` (offscreen: `QT_QPA_PLATFORM=offscreen`), then
+   `tools/verify_full_process.py`; TRT-vs-torch equivalence gate:
+   `tools/verify_trt_backend.py all [--rig]`. Bring-up is merged —
+   day-to-day work lands on `master` (both machines run it); re-branch
+   `orin` only for risky device experiments.

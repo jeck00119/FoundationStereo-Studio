@@ -115,8 +115,14 @@ git clone <this repo> && cd FoundationStereo
 Notes for the Orin Nano 8 GB (unified CPU+GPU memory):
 - **Fast-FoundationStereo is the practical model** — FoundationStereo ViT-L
   does not fit. Use **Input scale 0.30 · Max disparity 192** (measured
-  device default; 0.35 fits when needed, the Windows 0.50 · 416 profile gets
-  OOM-killed by the kernel).
+  device default; the Windows 0.50 · 416 profile gets OOM-killed).
+- **The TensorRT backend is the Orin default**: same accuracy as the
+  PyTorch backend (median 0.034 px difference), **1.30 s vs 1.93 s** per
+  run at the device config, ~5 s cold start with no warm-up. First run at a
+  NEW size/disparity builds an engine once (status bar narrates; a
+  `.build.log` sits beside the engine; up to ~2 h) — the standard configs
+  are already cached. Scales ≥0.35 exceed this export flavor's memory on
+  8 GB — details and the plugin-path plan are in CLAUDE.md.
 - Weights: the readme's Google Drive folder is routinely quota-blocked —
   NVIDIA's official Hugging Face drop (`nvidia/c-fast-foundationstereo`) is
   the reliable source; it appears in the model picker as `hf-c-release` and
