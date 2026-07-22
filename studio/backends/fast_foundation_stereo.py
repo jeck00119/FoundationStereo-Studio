@@ -40,6 +40,18 @@ _HAS_TRITON = importlib.util.find_spec("triton") is not None
 if not _HAS_TRITON:
     os.environ.setdefault("TORCH_COMPILE_DISABLE", "1")
     os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
+elif os.name == "posix":
+    # Jetson (Orin Nano bring-up) findings — both must land before torch import:
+    # - Inductor's parallel compile-worker pool dies with SubprocException on
+    #   EVERY yet-uncached graph on this device; serial compilation just works,
+    #   and with the cross-shape kernel cache a full-model compile is only
+    #   seconds anyway (6 slow cores gain little from a worker pool).
+    # - Inductor's cache defaults under /tmp — tmpfs on Jetson, so every reboot
+    #   re-pays the multi-minute first-ever compile. Keep it on disk beside
+    #   ~/.triton (which already persists).
+    os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
+    os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR",
+                          os.path.expanduser("~/.cache/fsstudio-inductor"))
 
 import sys
 from typing import Optional
