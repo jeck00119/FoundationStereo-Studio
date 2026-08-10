@@ -52,81 +52,63 @@ read it first.
 
 ## On a Jetson Orin Nano (8 GB)
 
-Status: **port DONE on-device 2026-07-22** (JetPack 6, L4T R36.4.7). On that
-day: offscreen suite 69/69, `verify_3d_tab.py` 44/44 on the real display,
-`verify_full_process.py` 22/22, whole-app rig-sized run clean. What a fresh
-agent needs to know:
+Port **done** (2026-07-22, JetPack 6 / L4T R36.4.7). Setup, model and
+defaults are settled — this section is the device's operating manual.
 
-0. **JetPack 6.x (L4T R36+) is a hard prerequisite** — a JetPack 5 flash
-   (R35: Ubuntu 20.04, Python 3.8, CUDA 11.4, no Triton wheels) cannot run
-   this stack; `setup_jetson.sh` fails fast there with the reason. Reflash
-   with SDK Manager first. Verified 2026-07: the live torch index is
-   `pypi.jetson-ai-lab.io/jp6/cu126/+simple` (the old `.dev` host is dead)
-   and the PySide6 6.8.0.2 aarch64 Addons wheel DOES contain QtWebEngine.
-1. `./setup_jetson.sh` is proven end-to-end and self-repairs its known traps
-   (libcudss for torch≥2.10 — --no-deps matters, SBSA deps poison Tegra;
-   ptxas for the triton wheel; focal libwebp6 + libminizip1 for QtWebEngine).
-   open3d is optional (denoise self-skips without it).
-2. Weights: the readme's Drive folder
-   (`drive.google.com/drive/folders/1HuTt7UIp7gQsMiDvJwVuWmKpvFzIIMap`,
-   `gdown --folder`) is routinely quota-blocked for ~24 h. The reliable
-   source is NVIDIA's official HF drop — files
-   `huggingface.co/nvidia/c-fast-foundationstereo/resolve/main/{cfg.yaml,
-   model_best_bp2_serialize.pth}` into `weights/hf-c-release/`. Identified
-   2026-07-22 (registry comment has the full evidence chain): it is the
-   **v1.0 unpruned flagship** — 23-36-37 accuracy class, the author's
-   announced "commercial version" (issue #53) — so the BEST run is available
-   without Drive. Bit-identity with 23-36-37 remains unverified. That pickle
-   predates some upstream args — the adapter backfills them (`normalize`,
-   cf. upstream PR #41 fixing the same miss elsewhere); extend
-   `_NEWER_ARG_DEFAULTS` if a future "Missing key …" appears at forward
-   time.
-3. Compile behavior (the adapter pins inductor serial + a persistent cache
-   dir `~/.cache/fsstudio-inductor`; the parallel worker pool dies on this
-   device): the FIRST-ever compile on a fresh device runs >10 min with no
-   output — let it finish once (`python tools/bench_orin.py warmup`). After
-   that: new-shape compile 20–40 s, engine restart seconds, first Run in
-   each app session ~30 s, later Runs ~2 s.
-4. Measured defaults (MAXN_SUPER + jetson_clocks, rig-sized 2664×2304 pair,
-   valid_iters 8, warm engine, whole numbers = `tools/bench_orin.py sweep`):
-   **Input scale 0.30 · Max disparity 192 is the device default** — 1.8 s,
-   1.08 GB GPU peak, and 2.6 GB system floor with the FULL app resident
-   (`tools/bench_app_orin.py 0.30`). 0.35 · 224 fits when needed (≈2.7 s,
-   ~1.7 GB peak, floor ≈2 GB); 0.40 · 256 leaves ~1.1 GB engine-only — GUI
-   on top makes it OOM-adjacent; the Windows profile 0.50 · 416 is
-   **OOM-killed by the kernel** (6.6 GB RSS, dmesg receipt). Disparity rule
-   still applies: needed ≈ scale × 546 px ≤ Max disparity.
-   Orin ≈ 7.7× slower than the 3060 at identical config (2.68 s vs 0.35 s at
-   932×806·192) with byte-identical 1.49 GB GPU peak — the compiled cost
-   volume behaves the same everywhere.
-5. Power: stock nvpmodel.conf lacks the Super modes AND this board's
-   mis-flashed DTB (no 'super' compatible marker) makes nvpower.sh RELINK
-   the non-super conf at every boot — the enabled oneshot unit
-   `fsstudio-maxn-super.service` re-applies MAXN_SUPER after it. Run
-   `jetson_clocks` manually before benchmarking (not persisted, by design).
-   The Tegra hardware watchdog resets the box if PID 1 stalls 2 min — that
-   is what a pinned-memory exhaustion looks like from the outside (it
-   happened once; the TRT export architecture below is the consequence).
-6. The TensorRT backend (`studio/backends/fast_fs_trt.py`, upstream's
-   single-ONNX export + trtexec FP16) is BUILT and is the **Orin default**
-   since 2026-07-22. At the device config (0.30 · 192, rig-sized pair):
-   median |Δdisp| vs the torch backend 0.034 px (p95 0.156), valid 100%,
-   **1.30 s vs 1.93 s warm, ~5 s cold start, no warm-up ever**. Engines
-   cache per (padded size · iters · max_disp) at `weights/<run>/trt/` —
-   one-time ~1¾ h build per config at default opt level (FS_TRT_OPT_LEVEL=2
-   for several-fold faster probe builds), narrated by minute heartbeats +
-   a kept `.build.log`. Exports run CPU-side in a throwaway subprocess
-   (GPU-side tracing pins >5 GB — that is the watchdog-reset above).
-   **Measured hard wall: single-ONNX TRT cannot exceed scale 0.30 on 8 GB**
-   — at ≥0.35·224 trtexec dies at `PWN(/Mul_1)`, the cost-volume multiply,
-   demanding 4.1–4.7 GB device memory for materialized ONNX-op volumes
-   (NVlabs issue #43's mystery 'PWN(/Mul_1)' report is this same wall).
-   The road past 0.30 on-device is upstream's TRT **plugin** path (PR #55:
-   fused GWC-volume kernel, plugin .so build) — the designated next project
-   if >0.30 accuracy is ever needed on the Orin; until then 0.35+ belongs
-   to the Windows machine.
-7. Validate with `pytest tests` (offscreen: `QT_QPA_PLATFORM=offscreen`), then
-   `tools/verify_full_process.py`; TRT-vs-torch equivalence gate:
-   `tools/verify_trt_backend.py all [--rig]`. Bring-up is merged —
-   day-to-day work lands on `master` (both machines run it); re-branch
-   `orin` only for risky device experiments.
+**Setup**: `./setup_jetson.sh` (idempotent, self-repairs its known traps:
+libcudss for torch≥2.10 — `--no-deps` is load-bearing, SBSA deps poison
+Tegra; ptxas for the triton wheel; focal libwebp6 + libminizip1 for
+QtWebEngine; system TensorRT bindings symlinked in). JetPack 6 is a hard
+prerequisite — it fails fast on JetPack 5 with the reason. open3d is
+optional (denoise self-skips).
+
+**Weights**: the readme's Drive folder is routinely quota-blocked ~24 h.
+Use NVIDIA's HF drop —
+`huggingface.co/nvidia/c-fast-foundationstereo/resolve/main/{cfg.yaml,
+model_best_bp2_serialize.pth}` → `weights/hf-c-release/`. It is the **v1.0
+unpruned flagship** (23-36-37 accuracy class; evidence chain in
+`backends/registry.py`), so the best run needs no Drive. Its pickle predates
+some upstream args — the adapter backfills them (`_NEWER_ARG_DEFAULTS`;
+extend it if a new "Missing key …" ever appears at forward time).
+
+**Defaults** — backend **Fast-FS · TensorRT**, scale **0.30** · max_disp
+**192**. Measured (MAXN_SUPER + `jetson_clocks`, rig-sized 2664×2304 pair,
+iters 8, warm):
+
+| backend | warm | cold start | note |
+|---|---|---|---|
+| TensorRT (default) | **1.30 s** | ~5 s, no warm-up ever | Δ vs torch: median 0.034 px, p95 0.156, valid 100 % |
+| PyTorch/triton | 1.93 s | 10.7 s + ~30 s first Run per session | fallback, one click away |
+
+Full app press-to-cloud ≈ 3 s. Scale rule: needed disparity ≈ scale × 546 px
+≤ max_disp. Orin ≈ 7.7× slower than the PC's 3060 at identical config.
+
+**Ceilings (measured, do not re-litigate)**: TRT engines cannot exceed
+scale 0.30 on 8 GB — at ≥0.35 trtexec dies at `PWN(/Mul_1)` wanting
+4.1–4.7 GB for materialized cost-volume ops (this is also NVlabs issue
+#43's unexplained report). PyTorch reaches 0.40 engine-only but is
+OOM-adjacent with the GUI up; 0.50·416 is kernel-OOM-killed. **Next project
+if >0.30 is ever needed here: upstream's TRT plugin path (PR #55, fused GWC
+kernel).** Until then 0.35+ belongs to the Windows machine.
+
+**TRT engine cache**: per (padded size · iters · max_disp) under
+`weights/<run>/trt/`, survives reboots. A new size builds once — ~1¾ h at
+default opt level (`FS_TRT_OPT_LEVEL=2` for far faster probe builds),
+narrated by minute heartbeats with a kept `.build.log`. ONNX export runs
+CPU-side in a throwaway subprocess **on purpose**: GPU-side tracing pins
+>5 GB of unswappable memory and once starved the box until the Tegra
+watchdog reset it.
+
+**Device quirks**: the mis-flashed DTB makes `nvpower.sh` relink the
+non-super nvpmodel conf every boot — the enabled `fsstudio-maxn-super`
+oneshot re-applies MAXN_SUPER after it; run `jetson_clocks` manually before
+timing work. TorchInductor's parallel compile pool dies here, so the torch
+adapter pins serial compile + a persistent cache dir (first-ever compile on
+a fresh device is >10 min with no output — let it finish once via
+`tools/bench_orin.py warmup`).
+
+**Validate**: `pytest tests` (offscreen: `QT_QPA_PLATFORM=offscreen`) →
+`tools/verify_full_process.py` → `tools/verify_trt_backend.py all [--rig]`
+(TRT-vs-torch gate). Benchmarks: `tools/bench_orin.py`,
+`tools/bench_app_orin.py`. Work lands on `master`; re-branch `orin` only for
+risky device experiments.
