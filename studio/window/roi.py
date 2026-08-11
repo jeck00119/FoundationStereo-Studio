@@ -1,0 +1,125 @@
+"""The ROI crop and its disparity pre-shift.
+
+Owns the two numbers that decide WHICH pixels a run reconstructs: the rectangle
+drawn on the Input tab, and Δ — how far left the right crop starts. They live
+here rather than in the parameter panel because they are a region of the
+picture, not a knob; the window attaches them to every run's params.
+
+See ``StereoParams.roi`` for what the pair buys (full-resolution macro stereo on
+a memory budget that could not otherwise reach it).
+"""
+from __future__ import annotations
+
+import json
+
+
+class RoiController:
+    """Draw-a-box crop + the measured pre-shift. Public surface:
+    ``roi`` · ``disp_shift`` · ``dispatch_pair()`` · ``on_roi_changed()`` ·
+    ``on_find_shift()`` · ``save()`` · ``restore()``."""
+
+    #: how far under the measured disparity Δ is placed, in full-res px. The
+    #: match reports the disparity at ONE depth; parts stand proud of it, and a Δ
+    #: past the smallest disparity present would clip the far end of the scene to
+    #: zero — which reads as "no match" rather than "too far".
+    SHIFT_MARGIN_PX = 24.0
+
+    def __init__(self, win) -> None:
+        self.win = win
+        self.roi: tuple | None = None    # (x0, y0, w, h), rectified full-res px
+        self.disp_shift: float = 0.0     # Δ, measured by "Find shift"
+
+    # ------------------------------------------------------------- dispatch
+    def dispatch_pair(self, params):
+        """The loaded pair, cropped to the run's ROI — exactly what goes over the
+        socket to the engine child.
+
+        Every non-batch dispatch site goes through here so none of them can be
+        missed: sending full frames alongside params that declare an ROI produces
+        a silently wrong reconstruction (shifted K and an un-shifted disparity
+        applied to uncropped pixels), not a visible failure. The batch has its own
+        path only because it rectifies each file as it goes — and it crops in the
+        same step. left_rgb/right_rgb are already rectified (the Input tab shows
+        them), which is the frame the ROI was drawn in.
+        """
+        from ..rectify import crop_pair
+
+        panel = self.win.input_panel
+        return crop_pair(panel.left_rgb, panel.right_rgb, params)
+
+    # ---------------------------------------------------------------- edits
+    def on_roi_changed(self, roi) -> None:
+        """The drawn crop moved. A different crop is a different reconstruction,
+        so the shown result is stale — and Δ belonged to the OLD rectangle, so it
+        is dropped rather than silently re-used against a region it never
+        matched."""
+        if self.win._batching:
+            return                       # geometry is frozen for the study
+        same = (roi == self.roi)
+        self.roi = tuple(roi) if roi is not None else None
+        if not same:
+            self.disp_shift = 0.0
+            self.win._mark_stale()
+        self.save()
+
+    def on_find_shift(self) -> None:
+        """Measure Δ by matching the ROI's pixels in the right image."""
+        from ..rectify import find_disparity_shift
+
+        win = self.win
+        if self.roi is None:
+            win._set_status("Draw an ROI first.")
+            return
+        left, right = win.input_panel.left_rgb, win.input_panel.right_rgb
+        if left is None or right is None:
+            win._set_status("Load a pair first — the shift is measured from the images.")
+            return
+        r = find_disparity_shift(left, right, self.roi)
+        view = win.viewer.input_view
+        if not r["ok"]:
+            view.set_roi_note("no confident match")
+            win._report_error(
+                f"Couldn't measure the shift for this ROI (confidence "
+                f"{r['score']:.2f}).\n\nThe region probably has too little texture "
+                "to match. Draw the box over the parts you measure — pins, "
+                "silkscreen, connectors — not a bare area of board.")
+            return
+        self.disp_shift = max(0.0, float(r["shift"]) - self.SHIFT_MARGIN_PX)
+        win._mark_stale()
+        self.save()
+        note = f"Δ {self.disp_shift:.0f} px  ·  match {r['score']:.2f}"
+        if abs(r["dy"]) > 2:
+            note += f"  ·  row offset {r['dy']:+d} px"
+            win._set_status(
+                f"Shift found, but the match sits {r['dy']:+d} px off its own row — "
+                "a rectified pair should be row-aligned. Check the calibration.")
+        else:
+            win._set_status(
+                f"Shift {self.disp_shift:.0f} px (matched {r['shift']:.0f}, "
+                f"confidence {r['score']:.2f}). Run to reconstruct just this region.")
+        view.set_roi_note(note)
+
+    # ----------------------------------------------------------- persistence
+    def save(self) -> None:
+        try:
+            self.win.settings.setValue("roi", json.dumps(
+                {"roi": list(self.roi) if self.roi else None,
+                 "shift": float(self.disp_shift)}))
+        except Exception:   # noqa: BLE001 — a settings write must never break the UI
+            pass
+
+    def restore(self, blob) -> None:
+        """Reload a saved crop. set_roi() deliberately does NOT re-emit, so this
+        cannot look like a user edit — which would drop the Δ saved beside it."""
+        if not (isinstance(blob, dict) and blob.get("roi")):
+            return
+        try:
+            self.roi = tuple(int(v) for v in blob["roi"])
+            self.disp_shift = float(blob.get("shift", 0.0))
+        except (TypeError, ValueError):   # a bad blob must not wedge startup
+            self.roi, self.disp_shift = None, 0.0
+            return
+        view = self.win.viewer.input_view
+        view.set_roi(self.roi)
+        if self.disp_shift:
+            view.set_roi_note(f"Δ {self.disp_shift:.0f} px")

@@ -8,25 +8,25 @@ import os
 
 import numpy as np
 from PySide6.QtCore import QSettings, Qt, QTimer
-from PySide6.QtGui import QAction
-from PySide6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QLabel,
-                               QMainWindow, QMenu, QMessageBox, QProgressBar,
-                               QPushButton, QScrollArea, QSizePolicy, QToolBar,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QMainWindow,
+                               QMessageBox, QProgressBar, QPushButton,
+                               QScrollArea, QSizePolicy, QToolBar, QVBoxLayout,
+                               QWidget)
 
 from .backends import DEFAULT_BACKEND, get_spec
 from .batch import BatchDialog, load_cloud, load_rgb
 from .compare import PLANE_TIP
-from .dtypes import (ANGLE_DECIMALS, UNIT_DECIMALS, UNIT_PER_M, CloudResult,
+from .dtypes import (UNIT_DECIMALS, UNIT_PER_M, CloudResult,
                      StereoParams)
 from .engine import REPO_ROOT
-from .analyze import (board_plane, deviation, pin_analysis, point_distance,
-                      region_flatness, surface_profile)
-from .measure import (MeasureBox, fit_plane, measure_box, points_in_box,
-                      rotation_to_axis)
+from .measure import MeasureBox, measure_box
 from .panels import InputPanel, ParamPanel
 from .theme import apply_theme
 from .viewers import ViewerStack
+from .window.analyze import AnalyzeController
+from .window.export import ExportController
+from .window.level import LevelController
+from .window.roi import RoiController
 from .worker import EngineClient
 
 
@@ -67,11 +67,6 @@ class MainWindow(QMainWindow):
         self._reset_cloud_view = True   # frame the camera on the next cloud
         self._cloud_pending = False     # a cloud rebuild is queued behind a busy one
         self._stale = False             # a 'needs run' setting changed since last run
-        # --- ROI crop + disparity pre-shift. Drawn on the Input view, not in the
-        # parameter panel, because it is a region of the picture. Both ride into
-        # every run via _current_params and are frozen for a batch like the boxes.
-        self._roi = None                # (x0, y0, w, h) in rectified full-res px
-        self._disp_shift = 0.0          # Δ, measured by "Find shift"
         self._pair_version = 0          # bumped whenever the image pair changes
         self._run_pair_version = -1     # the pair a dispatched run belongs to
         self._units = "mm"              # display unit for depth/cloud (mm default)
@@ -79,20 +74,9 @@ class MainWindow(QMainWindow):
         # --- level-to-plane: a fixed rotation that flattens the board (removes the
         # camera-vs-board tilt). Applied to EVERY cloud, so the whole fixed-fixture
         # batch reconstructs straight and pin heights read perpendicular to the board.
-        self._level_R = None            # 3x3 rotation, or None (off)
-        self._level_c_m = None          # rotation centre, canonical metres
         # (each cloud's un-levelled points ride on the CloudResult itself as
         # .raw_points — a single window-level slot desynced from self.cloud on
         # every blink/batch and spliced one cloud's points into another's colors)
-        # --- analyze tools: pick points on the cloud to measure surface/pins ---
-        self._analyze_tool = ""         # '' | profile | distance | region | point
-        self._picked: list = []         # points clicked for the current measurement
-        self._dev_on = False            # deviation-from-plane heatmap active
-        self._analyze_isolate = False   # region/profile: keep only the picked Z level
-        self._z_offset_m = None         # flat-reference zero offset (canonical metres)
-        self._z_ref_pp_m = 0.0          # the reference zone's max−min (flatness uncertainty)
-        self._last_region = None        # last region_flatness result (to zero from)
-        self._analyze_last = None       # what the analyze card shows now: tool name | 'pin' | None
         # --- folder batch: a third reply-consumer beside compare/overlay. Runs each
         # pair through the loaded model + frozen boxes, logging one row per capture. ---
         self._batching = False
@@ -110,6 +94,12 @@ class MainWindow(QMainWindow):
         self._batch_logged = 0
         self._batch_empty = 0              # captures where no box caught any points
         self._batch_failed: list = []      # [(label, reason)]
+
+        # each controller OWNS its state; the window only routes signals to it
+        self.roi = RoiController(self)
+        self.level = LevelController(self)
+        self.export = ExportController(self)
+        self.analyze = AnalyzeController(self)
 
         self._build_ui()
         self._start_worker()
@@ -189,7 +179,7 @@ class MainWindow(QMainWindow):
         self.export_btn.setEnabled(False)
         self.export_btn.setToolTip("Save results — disparity/depth images (PNG), raw arrays "
                                    "(NPY), or the 3D point cloud (PLY).")
-        self._build_export_menu()
+        self.export.build_menu()
         tb.addWidget(self.export_btn)
 
         self.units_btn = QPushButton("mm")
@@ -235,21 +225,21 @@ class MainWindow(QMainWindow):
         self.param_panel.boxSelectionChanged.connect(self._apply_measure)
         self.param_panel.addBoxRequested.connect(self._on_add_box)
         self.param_panel.logRequested.connect(self._log_reading)
-        self.param_panel.levelRequested.connect(self._on_level_toggled)
-        self.param_panel.analyzeToolChanged.connect(self._on_analyze_tool)
-        self.param_panel.deviationToggled.connect(self._on_deviation)
-        self.param_panel.isolateLayerToggled.connect(self._on_isolate_layer)
-        self.param_panel.flatRefToggled.connect(self._on_flat_ref)
-        self.param_panel.pinAnalyzeRequested.connect(self._on_pin_analyze)
+        self.param_panel.levelRequested.connect(self.level.on_toggled)
+        self.param_panel.analyzeToolChanged.connect(self.analyze.on_tool)
+        self.param_panel.deviationToggled.connect(self.analyze.on_deviation)
+        self.param_panel.isolateLayerToggled.connect(self.analyze.on_isolate_layer)
+        self.param_panel.flatRefToggled.connect(self.analyze.on_flat_ref)
+        self.param_panel.pinAnalyzeRequested.connect(self.analyze.on_pin_analyze)
         self.param_panel.measure_sw.toggled.connect(self._on_measure_toggled)
         self.viewer.repeat_view.logRequested.connect(self._log_reading)
         self.viewer.hovered.connect(self._on_hover)
         self.viewer.pixelClicked.connect(self._on_pixel_clicked)
-        self.viewer.input_view.roiChanged.connect(self._on_roi_changed)
-        self.viewer.input_view.findShiftRequested.connect(self._on_find_shift)
+        self.viewer.input_view.roiChanged.connect(self.roi.on_roi_changed)
+        self.viewer.input_view.findShiftRequested.connect(self.roi.on_find_shift)
         self.viewer.cloud_view.boxEdited.connect(self._on_box_edited)
         self.viewer.cloud_view.boxSelected.connect(self._on_box_selected)
-        self.viewer.cloud_view.pointPicked.connect(self._on_point_picked)
+        self.viewer.cloud_view.pointPicked.connect(self.analyze.on_point_picked)
         self.viewer.cloud_view.overlayToggled.connect(self._on_overlay_toggled)
         self.viewer.compare_view.runRequested.connect(self._start_compare)
         self.viewer.compare_view.showRequested.connect(self._show_model)
@@ -334,22 +324,6 @@ class MainWindow(QMainWindow):
         sa.setFixedWidth(w.width() + 16)
         sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         return sa
-
-    def _build_export_menu(self) -> None:
-        m = QMenu(self)
-        acts = [
-            ("Disparity image (PNG)…", lambda: self._export("disp_png")),
-            ("Depth image (PNG)…", lambda: self._export("depth_png")),
-            ("Disparity — raw (.npy)…", lambda: self._export("disp_npy")),
-            ("Depth — raw (.npy)…", lambda: self._export("depth_npy")),
-            ("Point cloud (.ply)…", lambda: self._export("ply")),
-            ("Everything → folder…", lambda: self._export("all")),
-        ]
-        for label, fn in acts:
-            a = QAction(label, self)
-            a.triggered.connect(fn)
-            m.addAction(a)
-        self.export_btn.setMenu(m)
 
     # -------------------------------------------------------------- worker
     def _start_worker(self) -> None:
@@ -603,7 +577,7 @@ class MainWindow(QMainWindow):
         self._run_pair_version = self._pair_version
         p = self._compare_params(key)
         self._last_params = p
-        left, right = self._dispatch_pair(p)
+        left, right = self.roi.dispatch_pair(p)
         self.worker.runInference(left, right, p)
 
     def _abort_compare(self, reason: str) -> None:
@@ -763,7 +737,7 @@ class MainWindow(QMainWindow):
             # gizmo mustn't be draggable (it would diverge the drawn box from the
             # logged one and persist the nudge) — and non-editable while an Analyze
             # tool is armed, or the drag gizmo swallows the click meant to PICK a point
-            editable = not self._batching and not self._analyze_tool
+            editable = not self._batching and not self.analyze.tool
             cv.set_boxes([b for _n, b, _t in specs],
                          self.param_panel.selected_index(), editable)
             self.viewer.repeat_view.set_pins([n for n, _b, _t in specs])
@@ -893,322 +867,7 @@ class MainWindow(QMainWindow):
             clouds.append(self.cloud)
         return clouds
 
-    def _ingest_level(self, cloud):
-        """Record the raw points ON the cloud and apply the active level rotation, so
-        every cloud (single run, compare, or batch) reconstructs in the levelled
-        frame. With level off, raw_points is the same array as points (no copy)."""
-        if self._has_points(cloud):
-            cloud.raw_points = cloud.points
-            if self._level_R is not None:
-                cloud.points = self._apply_level(cloud.points)
-        return cloud
-
-    def _apply_level(self, points):
-        """Rotate points into the levelled frame about the stored centre. The centre
-        is canonical metres; scale it to the display unit the points are in."""
-        if self._level_R is None:
-            return points
-        c = np.asarray(self._level_c_m, np.float64) * UNIT_PER_M[self._units]
-        return (np.asarray(points) - c) @ self._level_R.T + c
-
-    def _relevel_current(self) -> None:
-        """Re-derive EVERY cached cloud from its own raw points under the current
-        level state, then re-show. All clouds, not just the shown one: the overlay
-        and the multi-target measure read the compare caches directly, so leaving
-        them in the old frame mixed levelled and unlevelled points in one readout."""
-        for c in self._all_clouds():
-            raw = getattr(c, "raw_points", None)
-            if raw is not None:
-                c.points = self._apply_level(raw)   # level off -> returns raw itself
-        if not self._has_points(self.cloud):
-            return
-        if self._overlay_on:
-            self._show_overlay()        # re-stacks the re-levelled caches (+ measures)
-        else:
-            self.viewer.show_cloud(self.cloud, reset_view=True)
-            self._apply_measure()
-        self._reset_analyze_overlay()   # picks were in the pre-level frame
-        self._reapply_deviation()       # heatmap must reference the re-levelled plane
-
-    def _level_state(self) -> dict:
-        if self._level_R is None:
-            return {}
-        return {"R": self._level_R.tolist(), "c": np.asarray(self._level_c_m).tolist()}
-
-    def _on_level_toggled(self, on: bool) -> None:
-        """Level button: fit the board plane, rotate the cloud (and the boxes) so the
-        board is flat, and remember the rotation for every subsequent cloud."""
-        if on:
-            raw = getattr(self.cloud, "raw_points", None) if self.cloud is not None else None
-            if raw is None or len(raw) < 500:
-                self._set_status("No cloud to level yet — run a pair first.")
-                self.param_panel.set_level_checked(False)
-                return
-            n, c = fit_plane(raw)
-            if n[2] > 0:                    # point the board normal toward the camera (−Z)
-                n = -n
-            R = rotation_to_axis(n, (0.0, 0.0, -1.0))
-            tilt = float(np.degrees(np.arccos(np.clip(-n[2], -1.0, 1.0))))
-            self._level_c_m = np.asarray(c, np.float64) / UNIT_PER_M[self._units]
-            self._level_R = R
-            self.param_panel.transform_boxes(R, self._level_c_m, inverse=False)
-            self._relevel_current()
-            self._set_status(f"Levelled to the board plane — removed {tilt:.{ANGLE_DECIMALS}f}° of tilt.")
-        else:
-            if self._level_R is not None:
-                self.param_panel.transform_boxes(self._level_R, self._level_c_m, inverse=True)
-            self._level_R = self._level_c_m = None
-            self._relevel_current()
-            self._set_status("Levelling off — showing the raw camera-frame cloud.")
-
     # ------------------------------------------------------ analyze tools
-    def _board_plane(self):
-        """(normal, centroid) reference plane for the analyze tools — the levelling
-        plane if levelling is on (board normal = −Z), else a fresh fit."""
-        if self._level_R is not None:
-            c = np.asarray(self._level_c_m, np.float64) * UNIT_PER_M[self._units]
-            return np.array([0.0, 0.0, -1.0]), c
-        return board_plane(self.cloud.points)
-
-    def _on_analyze_tool(self, tool: str) -> None:
-        self._analyze_tool = tool or ""
-        self._picked = []
-        cv = self.viewer.cloud_view
-        cv.set_analyze_tool(tool or None)
-        cv.clear_analyze()
-        self.param_panel.set_profile(None, None)
-        self.param_panel.set_analyze_out(
-            "Click two points on the cloud." if tool in ("profile", "distance", "region")
-            else "Click a point on the cloud." if tool == "point" else "")
-        self._apply_measure()   # re-push box editability: freeze the gizmo while armed
-
-    def _reset_analyze_overlay(self) -> None:
-        """Drop the picked points, the 3D overlay, the profile plot and the readout —
-        called on ANY change to the cloud's frame/scale (unit, level) or identity
-        (new pair, model switch/blink), so a stale pick can't pair with a fresh one in
-        a mismatched frame and old markers can't float over a new cloud."""
-        self._picked = []
-        self._last_region = None        # its points are gone — can't zero from it anymore
-        self.param_panel.set_flat_ref_available(False)   # (an APPLIED ref stays removable)
-        self._analyze_last = None       # nothing shown in the card now
-        self.viewer.cloud_view.clear_analyze()
-        self.param_panel.set_profile(None, None)
-        self.param_panel.set_analyze_out("")
-
-    def _reapply_deviation(self) -> None:
-        """Re-paint the deviation heatmap after a cloud repaint. It's pushed as the
-        cloud's colours, so every photo repaint (rebuild, level, unit, blink) wipes
-        it; re-applying here keeps it live instead of silently reverting."""
-        if self._overlay_on:
-            return   # recoloring here would tint the whole overlay by one model's plane
-        if self._dev_on and self._has_points(self.cloud):
-            n, c = self._board_plane()
-            d, rng = deviation(self.cloud.points, n, c)
-            # colors-only push: the full set_cloud re-serialized the entire cloud
-            # (n×15 bytes + JS geometry rebuild) TWICE per repaint — once for the
-            # photo repaint, once more just to change these colors
-            self.viewer.cloud_view.set_cloud_colors(self._turbo(d, -rng, rng))
-
-    def _on_point_picked(self, x: float, y: float, z: float) -> None:
-        if not self._analyze_tool or not self._has_points(self.cloud):
-            return
-        need = 1 if self._analyze_tool == "point" else 2
-        p = np.array([x, y, z], np.float64)
-        self._picked = [p] if len(self._picked) >= need else self._picked + [p]
-        self.viewer.cloud_view.set_analyze_geom(
-            markers=[list(q) for q in self._picked], line=None)
-        if len(self._picked) >= need:
-            self._compute_analyze()
-
-    def _compute_analyze(self) -> None:
-        # no up-front float64 copy of the whole cloud: point/distance never touch
-        # it (the copy was ~2× cloud memory per click for nothing), and profile/
-        # region convert internally
-        pts = self.cloud.points
-        n, c = self._board_plane()
-        u, dec = self._units, UNIT_DECIMALS.get(self._units, 2)
-        off = self._z_off()                       # flat-reference correction (0 if none)
-        zed = "  (zeroed)" if off else ""
-        cv, tool = self.viewer.cloud_view, self._analyze_tool
-        self._analyze_last = tool                 # remember what's shown (to re-run on offset/rebuild)
-        try:
-            if tool == "point":
-                P = self._picked[0]
-                self.param_panel.set_analyze_result(
-                    "Point · height", f"{float((P - c) @ n) - off:.{dec}f}", u,
-                    rows=[("x", f"{P[0]:.{dec}f} {u}"),
-                          ("y", f"{P[1]:.{dec}f} {u}"),
-                          ("z", f"{P[2]:.{dec}f} {u}")],
-                    caption="height above the board plane" + zed)
-            elif tool == "distance":
-                A, B = self._picked
-                d = point_distance(A, B)
-                cv.set_analyze_geom(markers=[list(A), list(B)], line=[list(A), list(B)])
-                self.param_panel.set_analyze_result(
-                    "Distance", f"{d['dist']:.{dec}f}", u,
-                    rows=[("Δx", f"{d['dx']:+.{dec}f} {u}"),
-                          ("Δy", f"{d['dy']:+.{dec}f} {u}"),
-                          ("Δz", f"{d['dz']:+.{dec}f} {u}")])
-            elif tool == "profile":
-                A, B = self._picked
-                r = surface_profile(pts, A, B, n, c, isolate=self._analyze_isolate)
-                if r is None:
-                    self.param_panel.set_analyze_out("No surface between those points — pick two on the part.")
-                    return
-                cv.set_analyze_geom(markers=[list(A), list(B)],
-                                    line=[list(q) for q in r["poly"]])
-                self._highlight_used(r.get("used"))
-                self.param_panel.set_profile(r["t"], r["h"])
-                self.param_panel.set_analyze_result(
-                    "Surface angle", f"{r['angle']:+.{ANGLE_DECIMALS}f}°", "",
-                    rows=[("rise", f"{r['d_height']:+.{dec}f} {u}"),
-                          ("distance", f"{r['dist']:.{dec}f} {u}"),
-                          ("samples", f"{r['n_pts']:,}")],
-                    caption="slope vs the board plane")
-            elif tool == "region":
-                A, B = self._picked
-                r = region_flatness(pts, A, B, n, c, isolate=self._analyze_isolate)
-                if r is None:
-                    self.param_panel.set_analyze_out("Empty region — pick two corners over the board.")
-                    return
-                cv.set_analyze_geom(markers=[list(A), list(B)], line=r["corners"])
-                self._highlight_used(r.get("used"))
-                self._last_region = r          # the raw result — what a flat-reference zeroes from
-                self.param_panel.set_flat_ref_available(True)   # now there IS something to zero to
-                self.param_panel.set_analyze_result(
-                    "Region flatness", f"{r['rms']:.{dec}f}", u,
-                    rows=[("max − min", f"{r['z_range']:.{dec}f} {u}"),
-                          ("avg Z", f"{r['z_mean'] - off:+.{dec}f} {u}"),
-                          ("local tilt", f"{r['local_tilt']:.{ANGLE_DECIMALS}f}°"),
-                          ("size u", f"{r['size_u']:.{dec}f} {u}"),
-                          ("size v", f"{r['size_v']:.{dec}f} {u}"),
-                          ("points", f"{r['n_pts']:,}")],
-                    caption="RMS vs patch plane · Z above board" + zed)
-        except Exception as exc:   # noqa: BLE001 — analysis must never crash the UI
-            self.param_panel.set_analyze_out(f"couldn't measure: {exc}")
-
-    def _z_off(self) -> float:
-        """The active flat-reference offset in the DISPLAY unit (0 if no reference)."""
-        if self._z_offset_m is None:
-            return 0.0
-        return float(self._z_offset_m) * UNIT_PER_M[self._units]
-
-    def _on_flat_ref(self, on: bool) -> None:
-        """Zero board-referenced heights to the last flat Region (on), or clear (off).
-        The offset is the region's average height (the cloud's systematic error at a zone
-        that should read 0); it's stored in canonical metres so it survives a unit switch
-        and applies to every cloud of the same fixture."""
-        if on:
-            r = self._last_region
-            if r is None:
-                self.param_panel.set_flat_ref_checked(False)
-                self._set_status("Measure a Region on a flat zone first, then zero to it.")
-                return
-            self._z_offset_m = float(r["z_mean"]) / UNIT_PER_M[self._units]
-            self._z_ref_pp_m = float(r["z_range"]) / UNIT_PER_M[self._units]
-            self._set_status("Flat reference set — board-referenced heights are now corrected.")
-        else:
-            self._z_offset_m = None
-            # un-applying may leave nothing to re-apply to (the region was reset)
-            self.param_panel.set_flat_ref_available(self._last_region is not None)
-        self._update_ref_label()
-        self._refresh_analyze()       # re-run whatever's shown (incl. a pin) with/without the correction
-
-    def _refresh_analyze(self) -> None:
-        """Re-run whatever the analyze card currently shows against the current cloud +
-        settings (flat-ref offset, isolate) — so the readout never goes stale after the
-        offset toggles or the cloud is rebuilt live. No-op if the card shows nothing."""
-        if self._analyze_last == "pin":
-            self._on_pin_analyze()
-        elif self._analyze_tool and self._picked and \
-                len(self._picked) >= (1 if self._analyze_tool == "point" else 2):
-            self._compute_analyze()
-
-    def _update_ref_label(self) -> None:
-        u, dec = self._units, UNIT_DECIMALS.get(self._units, 2)
-        if self._z_offset_m is None:
-            self.param_panel.set_flat_ref_text("")
-            return
-        off = self._z_offset_m * UNIT_PER_M[u]
-        pp = self._z_ref_pp_m * UNIT_PER_M[u]
-        self.param_panel.set_flat_ref_text(
-            f"correcting {-off:+.{dec}f} {u}   ·   flatness ±{pp / 2:.{dec}f} {u}")
-
-    def _highlight_used(self, used) -> None:
-        """Light up the exact points a region/profile measured, so the user can confirm
-        the right zone/level is used. Uniformly subsampled — a verification cue, not a
-        full re-render — so the runJavaScript payload stays small."""
-        if used is None or len(used) == 0:
-            self.viewer.cloud_view.set_analyze_highlight(None)
-            return
-        used = np.asarray(used)
-        cap = 5000
-        if len(used) > cap:
-            used = used[np.linspace(0, len(used) - 1, cap).astype(np.int64)]
-        self.viewer.cloud_view.set_analyze_highlight(used)
-
-    def _on_isolate_layer(self, on: bool) -> None:
-        """Toggle 'measure only the picked Z level' — re-run the live region/profile."""
-        self._analyze_isolate = bool(on)
-        if self._analyze_tool in ("region", "profile") and len(self._picked) >= 2:
-            self._compute_analyze()
-
-    def _on_deviation(self, on: bool) -> None:
-        if on and self._overlay_on:
-            # the heatmap is one model's distance to ONE board plane — over a stack
-            # of different models' points it's meaningless, and pushing it would
-            # silently collapse the overlay to the single shown cloud
-            self.param_panel.set_deviation_checked(False)
-            self._set_status("Deviation heatmap shows a single model — untick Overlay first.")
-            return
-        self._dev_on = bool(on)
-        if not self._has_points(self.cloud):
-            return
-        if on:
-            n, c = self._board_plane()
-            d, rng = deviation(self.cloud.points, n, c)
-            # colors-only: toggling the heatmap re-tints the cloud on screen —
-            # re-shipping every position for that was the single biggest
-            # avoidable transfer in the app (~60 MB at 4M points)
-            self.viewer.cloud_view.set_cloud_colors(self._turbo(d, -rng, rng))
-            dec = UNIT_DECIMALS.get(self._units, 4)
-            self._set_status(f"Deviation heatmap — ±{rng:.{dec}f} {self._units} about the board plane.")
-        else:
-            self.viewer.cloud_view.set_cloud_colors(self.cloud.colors)
-
-    @staticmethod
-    def _turbo(vals, lo, hi):
-        import cv2
-        t = np.clip((np.asarray(vals) - lo) / (hi - lo + 1e-12), 0.0, 1.0)
-        lut = cv2.applyColorMap(np.arange(256, dtype=np.uint8).reshape(-1, 1),
-                                cv2.COLORMAP_TURBO).reshape(-1, 3)[:, ::-1]   # BGR→RGB
-        return np.ascontiguousarray(lut[(t * 255).astype(np.uint8)], np.uint8)
-
-    def _on_pin_analyze(self) -> None:
-        if not self.param_panel.measure_on or not self._has_points(self.cloud):
-            self._set_status("Turn on the Volume box and select a pin box first.")
-            return
-        specs = self.param_panel.box_specs()
-        sel = self.param_panel.selected_index()
-        if not specs or not (0 <= sel < len(specs)):
-            self._set_status("Select a measure box on a pin.")
-            return
-        _name, box, _trim = specs[sel]
-        mask = points_in_box(self.cloud.points, box)
-        n, c = self._board_plane()
-        r = pin_analysis(np.asarray(self.cloud.points)[mask], n, c)
-        u, dec = self._units, UNIT_DECIMALS.get(self._units, 2)
-        if r is None:
-            self.param_panel.set_analyze_out("Pin box too sparse — place it tighter on the pin.")
-            return
-        off = self._z_off()            # flat-reference correction (0 if none)
-        self._analyze_last = "pin"     # remember (so an offset toggle / rebuild re-runs it)
-        vert = f"{r['verticality']:.{ANGLE_DECIMALS}f}°" if r["verticality"] is not None else "—"
-        self.param_panel.set_analyze_result(
-            "Pin height", f"{r['height'] - off:.{dec}f}", u,
-            rows=[("verticality", vert), ("points", f"{r['n_pts']:,}")],
-            caption="above the board plane" + ("  (zeroed)" if off else ""))
-
     def _default_box(self):
         """A new box: the current box's size, tilt-free, centred ON the cloud —
         on the actual point nearest the componentwise median. The bare median is
@@ -1348,8 +1007,8 @@ class MainWindow(QMainWindow):
         self.timing_lbl.setText(f"{r.timing.get('net_s', 0):.2f} s  ·  {r.W}×{r.H}")
         self.export_btn.setEnabled(True)
         self._apply_measure()   # same box, different points — re-measure and redraw
-        self._reset_analyze_overlay()   # picks belonged to the previous model's cloud
-        self._reapply_deviation()       # re-tint the blinked-in cloud if the heatmap's on
+        self.analyze.reset_overlay()   # picks belonged to the previous model's cloud
+        self.analyze.reapply_deviation()       # re-tint the blinked-in cloud if the heatmap's on
         self._update_compare_strip()
 
     def _captionable_tab(self) -> bool:
@@ -1585,7 +1244,7 @@ class MainWindow(QMainWindow):
     def _on_cloud(self, cloud) -> None:
         if self._pair_version != self._run_pair_version:
             return   # stale cloud from a superseded pair (busy already cleared by worker)
-        cloud = self._ingest_level(cloud)   # keep raw + apply the level rotation (if any)
+        cloud = self.level.ingest(cloud)   # keep raw + apply the level rotation (if any)
         if self._batching and self._batch_kind == "pairs":
             self._batch_on_cloud(cloud)
             return
@@ -1614,7 +1273,7 @@ class MainWindow(QMainWindow):
             self._reset_cloud_view = False
             self.points_lbl.setText(f"{cloud.n:,} pts" if cloud else "")
             self._apply_measure()
-            self._reapply_deviation()
+            self.analyze.reapply_deviation()
             if self._cloud_pending:   # a cloud param was nudged mid-sweep
                 self._cloud_pending = False
                 self._cloud_timer.start()
@@ -1636,10 +1295,10 @@ class MainWindow(QMainWindow):
                 "z-far in the Point cloud section; the cloud rebuilds live.")
         self._apply_measure()
         if fresh:
-            self._reset_analyze_overlay()       # picks belonged to the old reconstruction
+            self.analyze.reset_overlay()       # picks belonged to the old reconstruction
         else:
-            self._refresh_analyze()             # live param rebuild — re-measure on the new points
-        self._reapply_deviation()               # a live rebuild repaint wipes the heatmap
+            self.analyze.refresh()             # live param rebuild — re-measure on the new points
+        self.analyze.reapply_deviation()               # a live rebuild repaint wipes the heatmap
         if self._shown_model is not None:
             # keep the comparison cache in step with a live rebuild, or flipping
             # away and back would resurrect the pre-tweak cloud
@@ -1755,7 +1414,7 @@ class MainWindow(QMainWindow):
         self.points_lbl.setText("")
         self.timing_lbl.setText("")
         self.probe_lbl.setText("")
-        self._reset_analyze_overlay()   # picks/overlay belonged to the cleared cloud
+        self.analyze.reset_overlay()   # picks/overlay belonged to the cleared cloud
         self._update_compare_strip()
         self._sync_panel_gates()        # no cloud any more — Measure/Analyze gate off
 
@@ -1768,7 +1427,7 @@ class MainWindow(QMainWindow):
         self._abort_compare("New pair loaded — the comparison was cancelled. "
                             "Press Run comparison to start it on this pair.")
         self._clear_results()
-        self._reset_analyze_overlay()   # picks belong to the old pair's cloud
+        self.analyze.reset_overlay()   # picks belong to the old pair's cloud
         if self.input_panel.left_rgb is not None:
             self.viewer.show_input(self.input_panel.left_rgb, self.input_panel.right_rgb)
             self.viewer.setCurrentWidget(self.viewer.input_view)
@@ -1796,89 +1455,9 @@ class MainWindow(QMainWindow):
         # The crop lives on the Input VIEW (you drag it on the picture), not in the
         # parameter panel, so it is attached here — the one place every run,
         # comparison and batch builds its settings from.
-        p.roi = self._roi
-        p.disp_shift = float(self._disp_shift)
+        p.roi = self.roi.roi
+        p.disp_shift = float(self.roi.disp_shift)
         return p
-
-    def _dispatch_pair(self, params):
-        """The loaded pair, cropped to the run's ROI — exactly what goes over the
-        socket to the engine child.
-
-        Every non-batch dispatch site goes through here so none of them can be
-        missed: sending full frames alongside params that declare an ROI produces
-        a silently wrong reconstruction (shifted K and an un-shifted disparity
-        applied to uncropped pixels), not a visible failure. The batch has its own
-        path only because it rectifies each file as it goes — and it crops in the
-        same step. left_rgb/right_rgb are already rectified (the Input tab shows
-        them), which is the frame the ROI was drawn in.
-        """
-        from .rectify import crop_pair
-
-        return crop_pair(self.input_panel.left_rgb,
-                         self.input_panel.right_rgb, params)
-
-    # ----------------------------------------------------------------- ROI
-    def _on_roi_changed(self, roi) -> None:
-        """The drawn crop moved. A different crop is a different reconstruction,
-        so the shown result is stale — and Δ belonged to the OLD rectangle, so it
-        is dropped rather than silently re-used against a region it never matched."""
-        if self._batching:
-            return                       # geometry is frozen for the study
-        same = (roi == self._roi)
-        self._roi = tuple(roi) if roi is not None else None
-        if not same:
-            self._disp_shift = 0.0
-            self._mark_stale()
-        self._save_roi()
-
-    def _on_find_shift(self) -> None:
-        """Measure Δ by matching the ROI's pixels in the right image."""
-        from .rectify import find_disparity_shift
-
-        if self._roi is None:
-            self._set_status("Draw an ROI first.")
-            return
-        left, right = self.input_panel.left_rgb, self.input_panel.right_rgb
-        if left is None or right is None:
-            self._set_status("Load a pair first — the shift is measured from the images.")
-            return
-        r = find_disparity_shift(left, right, self._roi)
-        view = self.viewer.input_view
-        if not r["ok"]:
-            view.set_roi_note("no confident match")
-            self._report_error(
-                f"Couldn't measure the shift for this ROI (confidence "
-                f"{r['score']:.2f}).\n\nThe region probably has too little texture "
-                "to match. Draw the box over the parts you measure — pins, "
-                "silkscreen, connectors — not a bare area of board.")
-            return
-        # Back off a margin: Δ must stay UNDER the smallest disparity in the crop,
-        # because the networks emit non-negative disparity and anything past d_min
-        # would clip the far end of the scene to zero — which reads as "no match"
-        # rather than "too far". The match gives Δ at ONE depth; the parts stand
-        # proud of it, so leave room.
-        self._disp_shift = max(0.0, float(r["shift"]) - 24.0)
-        self._mark_stale()
-        self._save_roi()
-        note = (f"Δ {self._disp_shift:.0f} px  ·  match {r['score']:.2f}")
-        if abs(r["dy"]) > 2:
-            note += f"  ·  row offset {r['dy']:+d} px"
-            self._set_status(
-                f"Shift found, but the match sits {r['dy']:+d} px off its own row — "
-                "a rectified pair should be row-aligned. Check the calibration.")
-        else:
-            self._set_status(
-                f"Shift {self._disp_shift:.0f} px (matched {r['shift']:.0f}, "
-                f"confidence {r['score']:.2f}). Run to reconstruct just this region.")
-        view.set_roi_note(note)
-
-    def _save_roi(self) -> None:
-        try:
-            self.settings.setValue("roi", json.dumps(
-                {"roi": list(self._roi) if self._roi else None,
-                 "shift": float(self._disp_shift)}))
-        except Exception:   # noqa: BLE001 — a settings write must never break the UI
-            pass
 
     def _update_run_enabled(self) -> None:
         # "Run" is possible whenever the engine is free and a pair is loaded: if the
@@ -1947,7 +1526,7 @@ class MainWindow(QMainWindow):
         self._run_pair_version = self._pair_version   # tag which pair this run is for
         p = self._current_params()
         self._last_params = p          # kept for the disparity-saturation check
-        left, right = self._dispatch_pair(p)
+        left, right = self.roi.dispatch_pair(p)
         self.worker.runInference(left, right, p)
 
     # ---------------------------------------------------------- stale cue
@@ -2308,7 +1887,7 @@ class MainWindow(QMainWindow):
         if cols is None or len(cols) != len(pts):
             cols = np.full((len(pts), 3), 160, np.uint8)
         cloud = CloudResult(points=pts, colors=cols, n=len(pts))
-        cloud = self._ingest_level(cloud)    # level saved clouds the same way as live ones
+        cloud = self.level.ingest(cloud)    # level saved clouds the same way as live ones
         if not self._cloud_shown:            # show ONE, with the boxes, as confirmation
             self._cloud_shown = True
             self.cloud = cloud
@@ -2374,66 +1953,6 @@ class MainWindow(QMainWindow):
         self._batch_dialog = None
 
     # -------------------------------------------------------------- export
-    def _export(self, kind: str) -> None:
-        if self.result is None:
-            return
-        import imageio.v2 as imageio
-
-        from .engine import StereoEngine
-
-        r = self.result
-        if kind == "all":
-            d = QFileDialog.getExistingDirectory(self, "Export everything to…")
-            if not d:
-                return
-            try:
-                base = os.path.join(d, "fs_output")
-                imageio.imwrite(base + "_disparity.png", self.viewer.disp_view.render_rgb())
-                np.save(base + "_disparity.npy", r.disp)
-                if r.depth is not None:
-                    imageio.imwrite(base + "_depth.png", self.viewer.depth_view.render_rgb())
-                    np.save(base + f"_depth_{self._units}.npy", r.depth)
-                if self.cloud is not None:
-                    StereoEngine.save_cloud(base + "_cloud.ply", self.cloud)
-                self._set_status(f"Exported to {d}")
-            except Exception as exc:  # noqa: BLE001
-                self._report_error(str(exc))
-            return
-
-        specs = {
-            "disp_png": ("Save disparity image", "PNG (*.png)", ".png"),
-            "depth_png": ("Save depth image", "PNG (*.png)", ".png"),
-            "disp_npy": ("Save raw disparity", "NumPy (*.npy)", ".npy"),
-            "depth_npy": (f"Save depth ({self._units})", "NumPy (*.npy)", ".npy"),
-            "ply": ("Save point cloud", "PLY (*.ply)", ".ply"),
-        }
-        title, filt, ext = specs[kind]
-        path, _ = QFileDialog.getSaveFileName(self, title, "", filt)
-        if not path:
-            return
-        if not path.lower().endswith(ext):
-            path += ext
-        try:
-            if kind == "disp_png":
-                imageio.imwrite(path, self.viewer.disp_view.render_rgb())
-            elif kind == "depth_png":
-                if r.depth is None:
-                    raise ValueError("No depth — set calibration first.")
-                imageio.imwrite(path, self.viewer.depth_view.render_rgb())
-            elif kind == "disp_npy":
-                np.save(path, r.disp)
-            elif kind == "depth_npy":
-                if r.depth is None:
-                    raise ValueError("No depth — set calibration first.")
-                np.save(path, r.depth)
-            elif kind == "ply":
-                if self.cloud is None:
-                    raise ValueError("No point cloud — set calibration and run.")
-                StereoEngine.save_cloud(path, self.cloud)
-            self._set_status(f"Saved {os.path.basename(path)}")
-        except Exception as exc:  # noqa: BLE001
-            self._report_error(str(exc))
-
     # -------------------------------------------------------------- units
     _UNIT_CYCLE = ("mm", "µm", "m")   # click order — mm→µm (small pins) →m→mm
 
@@ -2498,8 +2017,8 @@ class MainWindow(QMainWindow):
         self._apply_measure()
         self._update_compare_strip()
         self.probe_lbl.setText("")           # old readout was in the previous unit
-        self._reset_analyze_overlay()        # picks/overlay were in the previous unit
-        self._reapply_deviation()            # the rescale repaint wiped the heatmap
+        self.analyze.reset_overlay()        # picks/overlay were in the previous unit
+        self.analyze.reapply_deviation()            # the rescale repaint wiped the heatmap
         self._update_ref_label()             # restate the flat-reference offset in the new unit
         self.settings.setValue("units", unit)
 
@@ -2544,28 +2063,12 @@ class MainWindow(QMainWindow):
         self.param_panel.restore_section_states(_blob("sections_param"))
         self.input_panel.restore_section_states(_blob("sections_input"))
         self.input_panel.restore_rect_state(_blob("rectify"))   # raw-mode + calib path
-        lvl = _blob("level")
-        if isinstance(lvl, dict) and lvl.get("R") and lvl.get("c"):
-            try:    # a persisted level rotation applies to every cloud this session too
-                self._level_R = np.array(lvl["R"], np.float64).reshape(3, 3)
-                self._level_c_m = np.array(lvl["c"], np.float64).reshape(3)
-                self.param_panel.set_level_checked(True)
-            except Exception:   # noqa: BLE001 — a bad blob must not wedge startup
-                self._level_R = self._level_c_m = None
+        self.level.restore(_blob("level"))
         try:      # saved measure boxes (new {boxes,sel} dict, or an old bare list)
             self.param_panel.restore_boxes(json.loads(s.value("box_presets", "") or "[]"))
         except (ValueError, TypeError):
             self.param_panel.restore_boxes([])
-        roi_blob = _blob("roi")     # the drawn crop + its measured Δ
-        if isinstance(roi_blob, dict) and roi_blob.get("roi"):
-            try:
-                self._roi = tuple(int(v) for v in roi_blob["roi"])
-                self._disp_shift = float(roi_blob.get("shift", 0.0))
-                self.viewer.input_view.set_roi(self._roi)
-                if self._disp_shift:
-                    self.viewer.input_view.set_roi_note(f"Δ {self._disp_shift:.0f} px")
-            except (TypeError, ValueError):   # a bad blob must not wedge startup
-                self._roi, self._disp_shift = None, 0.0
+        self.roi.restore(_blob("roi"))     # the drawn crop + its measured Δ
         self.viewer.compare_view.restore(_blob("compare"))
         self._refresh_compare_cards()
         # NOTE: calibration is intentionally NOT restored — it is per-pair, and
@@ -2602,7 +2105,7 @@ class MainWindow(QMainWindow):
                           ("sections_param", self.param_panel.section_states),
                           ("sections_input", self.input_panel.section_states),
                           ("rectify", self.input_panel.rect_state),
-                          ("level", self._level_state)):
+                          ("level", self.level.state)):
             try:   # never let a settings blob block the app from closing
                 s.setValue(name, json.dumps(get()))
             except Exception:   # noqa: BLE001
