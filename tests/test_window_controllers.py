@@ -37,6 +37,36 @@ def _tilted_board(n=40000, tilt=0.02, z0=210.0, seed=0):
 
 
 # --------------------------------------------------------------- structural
+def test_the_window_never_calls_a_method_it_no_longer_has(win):
+    """The broadest guard, and the one that was missing.
+
+    Extracting a cluster leaves callers behind in places no test walks. The first
+    version of this file only checked window<->controller references, so it
+    caught level.relevel_current() calling a moved method but NOT
+    _set_units() calling self._update_ref_label() — same bug, one frame further
+    out, found only by running the 3D-tab harness. Every self._* reference in
+    the window must resolve, full stop."""
+    src = open("studio/main_window.py").read()
+    refs = sorted(set(re.findall(r"self\.(_[A-Za-z]\w*)", src)))
+    missing = [r for r in refs if not hasattr(win, r)]
+    assert not missing, f"main_window calls self.{missing} which no longer exists"
+
+
+def test_tools_do_not_drive_a_moved_window_api(win):
+    """tools/ scripts drive the REAL window through its private API, so a rename
+    breaks them silently — they are not imported by the suite. verify_3d_tab.py
+    was calling win._ingest_level() for exactly this reason."""
+    import glob
+    missing = {}
+    for path in glob.glob("tools/*.py"):
+        src = open(path).read()
+        refs = set(re.findall(r"\bwin\.(_?[A-Za-z]\w*)", src))
+        bad = sorted(r for r in refs if not hasattr(win, r))
+        if bad:
+            missing[path] = bad
+    assert not missing, f"tools reference window members that no longer exist: {missing}"
+
+
 def test_every_controller_window_reference_resolves(win):
     """The guard that would have caught the level->analyze breakage."""
     missing = {}

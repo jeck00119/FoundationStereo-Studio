@@ -2019,7 +2019,7 @@ class MainWindow(QMainWindow):
         self.probe_lbl.setText("")           # old readout was in the previous unit
         self.analyze.reset_overlay()        # picks/overlay were in the previous unit
         self.analyze.reapply_deviation()            # the rescale repaint wiped the heatmap
-        self._update_ref_label()             # restate the flat-reference offset in the new unit
+        self.analyze.update_ref_label()             # restate the flat-reference offset in the new unit
         self.settings.setValue("units", unit)
 
     # -------------------------------------------------------------- theme

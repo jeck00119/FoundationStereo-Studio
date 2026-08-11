@@ -202,7 +202,7 @@ xy = rng.uniform(-15, 15, (30000, 2))
 z = 55.0 + np.tan(ang) * xy[:, 1] + rng.normal(0, 0.05, len(xy))
 bpts = np.column_stack([xy[:, 0], xy[:, 1], z]).astype(np.float32)
 bcols = np.full((len(bpts), 3), 140, np.uint8)
-cloud = win._ingest_level(CloudResult(points=bpts, colors=bcols, n=len(bpts)))
+cloud = win.level.ingest(CloudResult(points=bpts, colors=bcols, n=len(bpts)))
 win.cloud = cloud
 win.viewer.show_cloud(cloud, reset_view=True)
 win._apply_measure()
@@ -214,12 +214,12 @@ check("B2 Measure/Analyze ungated by the cloud",
 builds0 = dbg(page2)["builds"]
 n0, _ = fit_plane(win.cloud.points)
 tilt0 = np.degrees(np.arccos(min(1.0, abs(n0[2]))))
-win._on_level_toggled(True)
+win.level.on_toggled(True)
 n1, _ = fit_plane(win.cloud.points)
 check("B3 Level flattens the board", abs(n1[2]) > 0.9999 and tilt0 > 9.0,
       f"tilt before={tilt0:.2f} after={np.degrees(np.arccos(min(1.0, abs(n1[2])))):.4f}")
 check("B4 raw points keep the tilt (per-cloud raw)", abs(fit_plane(win.cloud.raw_points)[0][2]) < 0.999)
-win._on_level_toggled(False)
+win.level.on_toggled(False)
 check("B5 Level off restores the raw frame",
       np.allclose(win.cloud.points, win.cloud.raw_points, atol=1e-9))
 
@@ -231,12 +231,12 @@ sleep_ms(500)
 check("B5b level pushes settled (rapid pushes coalesce to one build)",
       d is not None and dbg(page2)["builds"] == d["builds"])
 js(page2, "window._dbgStamp(9)")
-win._on_deviation(True)
+win.analyze.on_deviation(True)
 check("B6 deviation heatmap shows (colors change)",
       wait_dbg(page2, lambda d: (lambda c: abs(c[0] - 140 / 255) > 0.05)(
           json.loads(js(page2, "window._dbgCol(0)")))) is not None)
 check("B7 deviation is colors-only (no rebuild)", dbg(page2)["stamp"] == 9)
-win._on_deviation(False)
+win.analyze.on_deviation(False)
 check("B8 deviation off restores photo colors",
       wait_dbg(page2, lambda d: (lambda c: abs(c[0] - 140 / 255) < 1e-3)(
           json.loads(js(page2, "window._dbgCol(0)")))) is not None)
