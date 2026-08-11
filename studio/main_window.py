@@ -67,6 +67,11 @@ class MainWindow(QMainWindow):
         self._reset_cloud_view = True   # frame the camera on the next cloud
         self._cloud_pending = False     # a cloud rebuild is queued behind a busy one
         self._stale = False             # a 'needs run' setting changed since last run
+        # --- ROI crop + disparity pre-shift. Drawn on the Input view, not in the
+        # parameter panel, because it is a region of the picture. Both ride into
+        # every run via _current_params and are frozen for a batch like the boxes.
+        self._roi = None                # (x0, y0, w, h) in rectified full-res px
+        self._disp_shift = 0.0          # Δ, measured by "Find shift"
         self._pair_version = 0          # bumped whenever the image pair changes
         self._run_pair_version = -1     # the pair a dispatched run belongs to
         self._units = "mm"              # display unit for depth/cloud (mm default)
@@ -240,6 +245,8 @@ class MainWindow(QMainWindow):
         self.viewer.repeat_view.logRequested.connect(self._log_reading)
         self.viewer.hovered.connect(self._on_hover)
         self.viewer.pixelClicked.connect(self._on_pixel_clicked)
+        self.viewer.input_view.roiChanged.connect(self._on_roi_changed)
+        self.viewer.input_view.findShiftRequested.connect(self._on_find_shift)
         self.viewer.cloud_view.boxEdited.connect(self._on_box_edited)
         self.viewer.cloud_view.boxSelected.connect(self._on_box_selected)
         self.viewer.cloud_view.pointPicked.connect(self._on_point_picked)
@@ -596,7 +603,8 @@ class MainWindow(QMainWindow):
         self._run_pair_version = self._pair_version
         p = self._compare_params(key)
         self._last_params = p
-        self.worker.runInference(self.input_panel.left_rgb, self.input_panel.right_rgb, p)
+        left, right = self._dispatch_pair(p)
+        self.worker.runInference(left, right, p)
 
     def _abort_compare(self, reason: str) -> None:
         """Stop an in-flight sweep and hand the app back to the user.
@@ -1522,10 +1530,20 @@ class MainWindow(QMainWindow):
     def _warn_if_saturated(self, result) -> None:
         mp = getattr(self._last_params, "model_params", None) or {}
         md = mp.get("max_disp")
-        sat = self._disparity_saturation(result.disp, md)
+        # max_disp bounds what the network SEARCHED, which with a pre-shift is the
+        # OBSERVED disparity (true − Δ). result.disp carries the true value, so
+        # comparing it directly would report ~100 % saturation on every ROI run —
+        # a permanent false alarm, and a modal one outside a batch. Invalid pixels
+        # stay at 0 rather than going negative, so the >0 validity test still holds.
+        off = float(getattr(result, "disp_offset", 0.0) or 0.0)
+        obs = (np.where(result.disp > 0, result.disp - off, 0.0).astype(np.float32)
+               if off else result.disp)
+        sat = self._disparity_saturation(obs, md)
         if sat < 0.02:
             return
-        d = result.disp[result.disp > 0]
+        d = obs[obs > 0]
+        if d.size == 0:
+            return
         need = int(np.ceil(float(np.percentile(d, 99)) * 1.15 / 32.0) * 32)
         msg = (f"{sat:.0%} of the image is pinned at the top of the disparity search "
                f"range (Max disparity {int(md)} px at this scale). Those regions come "
@@ -1774,7 +1792,93 @@ class MainWindow(QMainWindow):
 
     # ----------------------------------------------------------------- run
     def _current_params(self) -> StereoParams:
-        return self.param_panel.build_params(self.input_panel.calibration())
+        p = self.param_panel.build_params(self.input_panel.calibration())
+        # The crop lives on the Input VIEW (you drag it on the picture), not in the
+        # parameter panel, so it is attached here — the one place every run,
+        # comparison and batch builds its settings from.
+        p.roi = self._roi
+        p.disp_shift = float(self._disp_shift)
+        return p
+
+    def _dispatch_pair(self, params):
+        """The loaded pair, cropped to the run's ROI — exactly what goes over the
+        socket to the engine child.
+
+        Every non-batch dispatch site goes through here so none of them can be
+        missed: sending full frames alongside params that declare an ROI produces
+        a silently wrong reconstruction (shifted K and an un-shifted disparity
+        applied to uncropped pixels), not a visible failure. The batch has its own
+        path only because it rectifies each file as it goes — and it crops in the
+        same step. left_rgb/right_rgb are already rectified (the Input tab shows
+        them), which is the frame the ROI was drawn in.
+        """
+        from .rectify import crop_pair
+
+        return crop_pair(self.input_panel.left_rgb,
+                         self.input_panel.right_rgb, params)
+
+    # ----------------------------------------------------------------- ROI
+    def _on_roi_changed(self, roi) -> None:
+        """The drawn crop moved. A different crop is a different reconstruction,
+        so the shown result is stale — and Δ belonged to the OLD rectangle, so it
+        is dropped rather than silently re-used against a region it never matched."""
+        if self._batching:
+            return                       # geometry is frozen for the study
+        same = (roi == self._roi)
+        self._roi = tuple(roi) if roi is not None else None
+        if not same:
+            self._disp_shift = 0.0
+            self._mark_stale()
+        self._save_roi()
+
+    def _on_find_shift(self) -> None:
+        """Measure Δ by matching the ROI's pixels in the right image."""
+        from .rectify import find_disparity_shift
+
+        if self._roi is None:
+            self._set_status("Draw an ROI first.")
+            return
+        left, right = self.input_panel.left_rgb, self.input_panel.right_rgb
+        if left is None or right is None:
+            self._set_status("Load a pair first — the shift is measured from the images.")
+            return
+        r = find_disparity_shift(left, right, self._roi)
+        view = self.viewer.input_view
+        if not r["ok"]:
+            view.set_roi_note("no confident match")
+            self._report_error(
+                f"Couldn't measure the shift for this ROI (confidence "
+                f"{r['score']:.2f}).\n\nThe region probably has too little texture "
+                "to match. Draw the box over the parts you measure — pins, "
+                "silkscreen, connectors — not a bare area of board.")
+            return
+        # Back off a margin: Δ must stay UNDER the smallest disparity in the crop,
+        # because the networks emit non-negative disparity and anything past d_min
+        # would clip the far end of the scene to zero — which reads as "no match"
+        # rather than "too far". The match gives Δ at ONE depth; the parts stand
+        # proud of it, so leave room.
+        self._disp_shift = max(0.0, float(r["shift"]) - 24.0)
+        self._mark_stale()
+        self._save_roi()
+        note = (f"Δ {self._disp_shift:.0f} px  ·  match {r['score']:.2f}")
+        if abs(r["dy"]) > 2:
+            note += f"  ·  row offset {r['dy']:+d} px"
+            self._set_status(
+                f"Shift found, but the match sits {r['dy']:+d} px off its own row — "
+                "a rectified pair should be row-aligned. Check the calibration.")
+        else:
+            self._set_status(
+                f"Shift {self._disp_shift:.0f} px (matched {r['shift']:.0f}, "
+                f"confidence {r['score']:.2f}). Run to reconstruct just this region.")
+        view.set_roi_note(note)
+
+    def _save_roi(self) -> None:
+        try:
+            self.settings.setValue("roi", json.dumps(
+                {"roi": list(self._roi) if self._roi else None,
+                 "shift": float(self._disp_shift)}))
+        except Exception:   # noqa: BLE001 — a settings write must never break the UI
+            pass
 
     def _update_run_enabled(self) -> None:
         # "Run" is possible whenever the engine is free and a pair is loaded: if the
@@ -1843,7 +1947,8 @@ class MainWindow(QMainWindow):
         self._run_pair_version = self._pair_version   # tag which pair this run is for
         p = self._current_params()
         self._last_params = p          # kept for the disparity-saturation check
-        self.worker.runInference(self.input_panel.left_rgb, self.input_panel.right_rgb, p)
+        left, right = self._dispatch_pair(p)
+        self.worker.runInference(left, right, p)
 
     # ---------------------------------------------------------- stale cue
     def _needs_load(self) -> bool:
@@ -2058,6 +2163,9 @@ class MainWindow(QMainWindow):
         self.units_btn.setEnabled(False)
         self.export_btn.setEnabled(False)
         self.viewer.repeat_view.set_locked(True)
+        # the crop is part of the frozen geometry: moving it mid-study would
+        # reconstruct a different region under the same box names
+        self.viewer.input_view.set_roi_enabled(False)
         self.viewer.repeat_view.set_pins([n for n, _b, _t in self._batch_specs])
         self.viewer.setCurrentWidget(self.viewer.repeat_view)   # watch it fill
         self.progress.setRange(0, self._batch_total)
@@ -2078,7 +2186,9 @@ class MainWindow(QMainWindow):
             # rectify each pair exactly as a hand-dropped one (passthrough when the
             # input is already rectified) — the frozen _batch_params holds the same
             # derived calibration, so every capture is measured in one frame
-            left, right = self.input_panel.process_pair(left, right)
+            # frozen params carry the ROI, so each pair is rectified+cropped in one
+            # step — only the ROI's pixels are remapped, and only they cross the socket
+            left, right = self.input_panel.process_pair(left, right, self._batch_params)
         except Exception as exc:  # noqa: BLE001 — a bad image skips, never aborts
             self._batch_failed.append((label, f"couldn't read/rectify image: {exc}"))
             self._batch_done += 1
@@ -2161,6 +2271,9 @@ class MainWindow(QMainWindow):
         self.units_btn.setEnabled(False)
         self.export_btn.setEnabled(False)
         self.viewer.repeat_view.set_locked(True)
+        # the crop is part of the frozen geometry: moving it mid-study would
+        # reconstruct a different region under the same box names
+        self.viewer.input_view.set_roi_enabled(False)
         self.viewer.repeat_view.set_pins([n for n, _b, _t in self._batch_specs])
         self.viewer.setCurrentWidget(self.viewer.repeat_view)
         self.progress.setRange(0, self._batch_total)
@@ -2230,6 +2343,7 @@ class MainWindow(QMainWindow):
         self.units_btn.setEnabled(not self._busy)
         self.export_btn.setEnabled(self.result is not None)
         self.viewer.repeat_view.set_locked(False)
+        self.viewer.input_view.set_roi_enabled(True)
         self.progress.setRange(0, 0)      # back to the indeterminate busy spinner
         self.progress.setVisible(self._busy)
         self._update_run_enabled()
@@ -2442,6 +2556,16 @@ class MainWindow(QMainWindow):
             self.param_panel.restore_boxes(json.loads(s.value("box_presets", "") or "[]"))
         except (ValueError, TypeError):
             self.param_panel.restore_boxes([])
+        roi_blob = _blob("roi")     # the drawn crop + its measured Δ
+        if isinstance(roi_blob, dict) and roi_blob.get("roi"):
+            try:
+                self._roi = tuple(int(v) for v in roi_blob["roi"])
+                self._disp_shift = float(roi_blob.get("shift", 0.0))
+                self.viewer.input_view.set_roi(self._roi)
+                if self._disp_shift:
+                    self.viewer.input_view.set_roi_note(f"Δ {self._disp_shift:.0f} px")
+            except (TypeError, ValueError):   # a bad blob must not wedge startup
+                self._roi, self._disp_shift = None, 0.0
         self.viewer.compare_view.restore(_blob("compare"))
         self._refresh_compare_cards()
         # NOTE: calibration is intentionally NOT restored — it is per-pair, and

@@ -26,7 +26,9 @@ import numpy as np
 # far finer than anything this rig can resolve.
 _MAX_CELLS = 1e15
 
-# unit cube corners in [-1,1]^3, ordered so _EDGES wires them into 12 segments
+# the 8 unit-cube corners in [-1,1]^3 (bottom face, then top). The ORDER is not
+# load-bearing: corners() feeds only lo/hi, which take min/max — and the 3D view
+# builds its wireframe page-side from THREE.EdgesGeometry, never from this list.
 _UNIT_CORNERS = np.array([
     [-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1],
     [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1],
@@ -100,7 +102,7 @@ class MeasureBox:
 
     # --------------------------------------------------------------- geometry
     def corners(self) -> np.ndarray:
-        """The 8 world corners of the (possibly rotated) box, ordered for _EDGES."""
+        """The 8 world corners of the (possibly rotated) box."""
         u = _UNIT_CORNERS * self.half                       # local corners at ±half
         return (self.center + u @ self.rotation_matrix().T).astype(np.float32)
 
@@ -260,6 +262,64 @@ def measure_box(points, box: MeasureBox, trim_pct: float = 2.0,
         if box.volume > 0:
             out["fill_pct"] = 100.0 * vol / box.volume
     return out
+
+
+# --------------------------------------------------- ROI planning from boxes
+def roi_for_boxes(boxes, K_full, baseline, image_size, margin_px: float = 96.0,
+                  shift_margin_px: float = 24.0, scale: float = 1.0) -> dict | None:
+    """Plan an ROI crop + disparity pre-shift that covers ``boxes``.
+
+    The boxes ARE the region you measure, so they define the only pixels worth
+    reconstructing. Projecting them back through the full-resolution rectified K
+    gives the crop; their DEPTH span gives the pre-shift, which is where the real
+    saving is: a macro rig's absolute disparity (fx·B/Z) is huge but its span
+    across a few mm of parts is tiny, so starting the right crop at the smallest
+    disparity present lets max_disp collapse to that span.
+
+    ``boxes`` are MeasureBoxes in world units, ``K_full`` the FULL-FRAME rectified
+    intrinsics (never a cropped one — this computes the crop), ``baseline`` in the
+    same world unit, ``image_size`` = (W, H) of the rectified frame. ``scale`` only
+    affects the suggested max_disp. Returns None if no box projects in front of
+    the camera.
+    """
+    K = np.asarray(K_full, np.float64)
+    fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+    W, H = int(image_size[0]), int(image_size[1])
+    pts = np.concatenate([np.asarray(b.corners(), np.float64) for b in boxes]) \
+        if boxes else np.zeros((0, 3))
+    pts = pts[pts[:, 2] > 1e-9]                 # behind the camera projects to nonsense
+    if len(pts) == 0:
+        return None
+    z = pts[:, 2]
+    u = fx * pts[:, 0] / z + cx
+    v = fy * pts[:, 1] / z + cy
+
+    x0 = int(np.floor(u.min() - margin_px))
+    y0 = int(np.floor(v.min() - margin_px))
+    x1 = int(np.ceil(u.max() + margin_px))
+    y1 = int(np.ceil(v.max() + margin_px))
+    x0, y0 = max(0, min(x0, W - 1)), max(0, min(y0, H - 1))
+    x1, y1 = max(x0 + 1, min(x1, W)), max(y0 + 1, min(y1, H))
+    # round the crop out to a multiple of 32 so the network's own padding is a
+    # no-op at scale 1.0 (and near-free below it) — free pixels beat free padding
+    w = min(int(np.ceil((x1 - x0) / 32.0) * 32), W - x0)
+    h = min(int(np.ceil((y1 - y0) / 32.0) * 32), H - y0)
+
+    B = abs(float(baseline))
+    d_max = fx * B / float(z.min())              # nearest corner -> largest disparity
+    d_min = fx * B / float(z.max())
+    # Δ must stay UNDER the smallest disparity present: the networks emit
+    # non-negative disparity, so a Δ past d_min would clip the far end of the
+    # scene to zero and read as "no match" rather than "too far".
+    shift = max(0.0, float(np.floor(d_min - shift_margin_px)))
+    clamped = shift > x0                         # the right crop would leave the frame
+    if clamped:
+        shift = float(x0)
+    span = (d_max - shift) * float(scale)
+    need = max(64, int(np.ceil(span / 32.0) * 32))
+    return {"roi": (x0, y0, w, h), "disp_shift": shift,
+            "d_min": d_min, "d_max": d_max, "max_disp": need,
+            "shift_clamped": clamped}
 
 
 # ------------------------------------------------------------ plane levelling

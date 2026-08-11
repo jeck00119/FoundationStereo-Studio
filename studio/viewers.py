@@ -1,5 +1,9 @@
-"""Viewers: 2D scalar/RGB image view (colormap + pixel probe) and an embedded
-3D point-cloud view. Built on pyqtgraph + pyqtgraph.opengl."""
+"""Viewers: the 2D scalar/RGB image view (colormap + pixel probe), built on
+pyqtgraph, and the tab stack that arranges every view.
+
+The 3D point cloud is NOT here — it is ``web_cloud.WebCloudView`` (three.js in
+a QWebEngineView), which ViewerStack only hosts as a tab. Nothing in this
+module touches OpenGL."""
 from __future__ import annotations
 
 import numpy as np
@@ -36,6 +40,8 @@ class ImageView2D(QWidget):
 
     hovered = Signal(int, int)      # image x, y
     pixelClicked = Signal(int, int)  # image x, y — a left-click inside the image
+    roiChanged = Signal(object)     # (x0, y0, w, h) in LEFT-image pixels, or None
+    findShiftRequested = Signal()   # "Find shift" pressed (the window does the match)
 
     def __init__(self, scalar: bool = True, unit: str = "", pair: bool = False,
                  dec: int = 2, parent=None) -> None:
@@ -126,13 +132,44 @@ class ImageView2D(QWidget):
             self.guide_chk.toggled.connect(self._toggle_guides)
             self.side_lbl = QLabel("")
             self.side_lbl.setProperty("role", "muted")
+            # --- ROI: the crop the run is restricted to -----------------------
+            self.roi_chk = QCheckBox("ROI")
+            self.roi_chk.setToolTip(
+                "Restrict the run to a region of the LEFT image — drag the box "
+                "over the parts you measure.\n\nA macro pair's disparity is huge "
+                "(~500 px here) but varies only a few px across a flat board, so "
+                "cropping to what you measure and pre-aligning the right side "
+                "lets the whole run fit at FULL resolution instead of a shrunken "
+                "one — several times finer depth for less memory.")
+            self.roi_chk.toggled.connect(self._toggle_roi)
+            self.shift_btn = QPushButton("Find shift")
+            self.shift_btn.setEnabled(False)
+            self.shift_btn.setToolTip(
+                "Match the ROI's pixels in the right image to measure how far the "
+                "two views are offset. Needs no calibration and no prior run.")
+            self.shift_btn.clicked.connect(self.findShiftRequested)
+            self.roi_lbl = QLabel("")
+            self.roi_lbl.setProperty("role", "muted")
             bar.addWidget(QLabel("View"))
             bar.addWidget(self.btn_left)
             bar.addWidget(self.btn_right)
             bar.addWidget(self.fit_btn)
             bar.addWidget(self.guide_chk)
+            bar.addWidget(self.roi_chk)
+            bar.addWidget(self.shift_btn)
             bar.addStretch(1)
+            bar.addWidget(self.roi_lbl)
             bar.addWidget(self.side_lbl)
+            # The box itself. Snapped to a multiple of 32 (see _sync_roi) because
+            # the network pads its input up to that anyway — an unsnapped crop
+            # pays for pixels the user did not ask for.
+            self.roi = pg.RectROI([0, 0], [256, 256], pen=pg.mkPen("#f4883f", width=2),
+                                  handlePen=pg.mkPen("#f4883f", width=2))
+            self.roi.addScaleHandle([0, 0], [1, 1])
+            self.roi.setZValue(20)
+            self.roi.hide()
+            self.vb.addItem(self.roi)
+            self.roi.sigRegionChangeFinished.connect(self._sync_roi)
         else:
             bar.addStretch(1)
 
@@ -233,6 +270,89 @@ class ImageView2D(QWidget):
         self.set_image(left)          # fits the view (fresh load)
         self._update_side_lbl()
         self._rebuild_guides()        # re-place row guides for this image's height
+        if hasattr(self, "roi"):
+            # Re-clamp the crop into THIS image and re-announce it. Two cases need
+            # it: the box was switched on before any pair was loaded (so no size
+            # was known and nothing was ever emitted), and a pair of a DIFFERENT
+            # size arriving under a box that now hangs off the edge. Same size and
+            # position re-emits an identical rectangle, which the window treats as
+            # no change — so a measured Δ survives an ordinary pair reload.
+            self.roi.setVisible(self.roi_chk.isChecked())
+            self._sync_roi()
+
+    # ------------------------------------------------------------------- ROI
+    def _img_size(self):
+        a = self._left if self._left is not None else self._arr
+        return (a.shape[1], a.shape[0]) if a is not None else None
+
+    def _toggle_roi(self, on: bool) -> None:
+        """Turn the crop on/off. Switching on with no box yet drops a sensible
+        one in the middle rather than making the user hunt for a 1-px handle."""
+        self.shift_btn.setEnabled(on)
+        size = self._img_size()
+        if on and size is not None:
+            W, H = size
+            w = max(32, (min(W, H) // 3 // 32) * 32)
+            self.roi.setPos([(W - w) // 2, (H - w) // 2], finish=False)
+            self.roi.setSize([w, w], finish=False)
+        self.roi.setVisible(on and self._side == "left")
+        self._sync_roi()
+
+    def _sync_roi(self) -> None:
+        """Snap the box to a whole 32-px grid inside the image and announce it.
+
+        Snapping here rather than at run time keeps what you SEE and what gets
+        cropped the same rectangle — rounding it silently later would measure a
+        region the box never covered."""
+        if not self.roi_chk.isChecked():
+            self.roi_lbl.setText("")
+            self.roiChanged.emit(None)
+            return
+        size = self._img_size()
+        if size is None:
+            self.roi_lbl.setText("load a pair first")
+            self.roiChanged.emit(None)
+            return
+        W, H = size
+        p, s = self.roi.pos(), self.roi.size()
+        w = int(max(32, min(round(s[0] / 32) * 32, (W // 32) * 32)))
+        h = int(max(32, min(round(s[1] / 32) * 32, (H // 32) * 32)))
+        x0 = int(max(0, min(round(p[0] / 32) * 32, W - w)))
+        y0 = int(max(0, min(round(p[1] / 32) * 32, H - h)))
+        self.roi.blockSignals(True)      # writing back must not re-enter this slot
+        self.roi.setPos([x0, y0], finish=False)
+        self.roi.setSize([w, h], finish=False)
+        self.roi.blockSignals(False)
+        self.roi_lbl.setText(f"ROI {w}×{h} @ {x0},{y0}")
+        self.roiChanged.emit((x0, y0, w, h))
+
+    def set_roi(self, roi) -> None:
+        """Restore a saved ROI (from settings) without re-emitting a change."""
+        self.roi_chk.blockSignals(True)
+        self.roi_chk.setChecked(roi is not None)
+        self.roi_chk.blockSignals(False)
+        self.shift_btn.setEnabled(roi is not None)
+        if roi is not None:
+            x0, y0, w, h = (int(v) for v in roi)
+            self.roi.blockSignals(True)
+            self.roi.setPos([x0, y0], finish=False)
+            self.roi.setSize([w, h], finish=False)
+            self.roi.blockSignals(False)
+            self.roi_lbl.setText(f"ROI {w}×{h} @ {x0},{y0}")
+        else:
+            self.roi_lbl.setText("")
+        self.roi.setVisible(roi is not None and self._side == "left")
+
+    def set_roi_note(self, text: str) -> None:
+        self.roi_lbl.setText(text)
+
+    def set_roi_enabled(self, on: bool) -> None:
+        """Lock the crop controls (a running batch owns the geometry)."""
+        self.roi_chk.setEnabled(on)
+        self.shift_btn.setEnabled(on and self.roi_chk.isChecked())
+        self.roi.translatable = on
+        for hnd in self.roi.getHandles():
+            hnd.setVisible(on)
 
     def _toggle_guides(self, on: bool) -> None:
         self._rebuild_guides()
@@ -264,6 +384,11 @@ class ImageView2D(QWidget):
         self._arr = arr
         self._set_rgb(arr)            # fixed levels — no per-side contrast stretch
         self.vb.setRange(xRange=rng[0], yRange=rng[1], padding=0)  # restore exactly (blink)
+        # The ROI is defined on the LEFT image; the right crop sits Δ px away, so
+        # drawing the same rectangle over the right view would point at the wrong
+        # pixels. Hide it there rather than show a lie.
+        if hasattr(self, "roi"):
+            self.roi.setVisible(self.roi_chk.isChecked() and side == "left")
         self._update_side_lbl()
 
     def _update_side_lbl(self) -> None:
@@ -362,7 +487,7 @@ class ImageView2D(QWidget):
 
 
 class ViewerStack(QTabWidget):
-    """Input · Disparity · Depth · 3D Cloud · Compare."""
+    """Input · Disparity · Depth · 3D Cloud · Repeatability · Compare."""
 
     hovered = Signal(int, int)
     pixelClicked = Signal(int, int)

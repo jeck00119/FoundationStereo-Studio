@@ -59,6 +59,25 @@ class StereoParams:
     # this default is what a programmatic caller gets, and it should be the safe one.
     scale: float = 0.5
 
+    # --- ROI crop + disparity pre-shift (close-range macro rigs) -------------
+    # A macro rig's scene sits at one depth, so its disparity has a huge ABSOLUTE
+    # value but a tiny RANGE (measured on the PCB rig: ~425 px absolute, ~18 px of
+    # range over ±10 mm of depth). max_disp has to cover the absolute value, so
+    # ~95 % of the cost volume searches disparities that never occur — and that
+    # volume is the whole memory budget.
+    #
+    # roi crops to the part of the frame you actually measure; disp_shift Δ then
+    # starts the RIGHT crop Δ px further LEFT, which subtracts Δ from every
+    # observed disparity and lets max_disp collapse to the scene's range. Together
+    # they buy resolution: ROI 1024×768 · scale 1.00 · Δ 400 costs LESS than the
+    # rig's old scale-0.30 engine while resolving 3.4× finer.
+    #
+    # roi is (x0, y0, w, h) in RECTIFIED FULL-RESOLUTION pixels — the crop happens
+    # after rectification, so both sides stay row-aligned and fx/baseline are
+    # untouched; only the principal point moves (see intrinsics()).
+    roi: Optional[tuple] = None
+    disp_shift: float = 0.0    # Δ in full-resolution px; 0 = no pre-shift
+
     # backend-specific knobs (keys defined by the active backend's ParamSpecs)
     model_params: dict = field(default_factory=dict)
 
@@ -85,9 +104,35 @@ class StereoParams:
     def has_calibration(self) -> bool:
         return self.fx > 0 and self.baseline > 0
 
+    @property
+    def effective_shift(self) -> float:
+        """Δ actually applied, after clamping to the ROI origin.
+
+        The crop happens during input preparation (rectify.crop_pair /
+        Rectifier.rectify_roi) but the un-shift happens during inference, in
+        another process. Rather than ship the applied value between them — where
+        it could drift out of step with the params that travelled alongside it —
+        both sides derive it from the params with this one function. Pure, so it
+        cannot disagree with itself.
+
+        Clamped to x0 because the right crop cannot start before column 0. See
+        rectify.roi_rects for why clamping the SHIFT beats sliding the crop.
+        """
+        if self.roi is None:
+            return 0.0
+        return float(max(0.0, min(float(self.disp_shift), float(self.roi[0]))))
+
     def intrinsics(self, scale: float = 1.0) -> np.ndarray:
+        """Working-scale K. A crop moves the PRINCIPAL POINT by the ROI origin and
+        leaves fx/fy alone (it changes which pixels you keep, not the optics), so
+        back-projecting a cropped run lands in exactly the same world frame as an
+        uncropped one — measure boxes stay comparable across the two."""
+        cx, cy = float(self.cx), float(self.cy)
+        if self.roi is not None:
+            cx -= float(self.roi[0])
+            cy -= float(self.roi[1])
         K = np.array(
-            [[self.fx, 0, self.cx], [0, self.fy, self.cy], [0, 0, 1]],
+            [[self.fx, 0, cx], [0, self.fy, cy], [0, 0, 1]],
             dtype=np.float32,
         )
         K[:2] *= scale
@@ -125,6 +170,11 @@ class InferResult:
     rgb_right: Optional[np.ndarray] = None     # (H,W,3) uint8 right image, working scale
     # optional native per-pixel reliability from the backend (left reference)
     confidence: Optional[np.ndarray] = None    # (H,W) float32 0..1 or None
+    # Pre-shift actually applied, in WORKING-SCALE px (params.disp_shift × scale,
+    # after clamping to the frame edge). ``disp`` above is already the TRUE
+    # disparity — this is kept so the cloud stage can recover what the network
+    # observed, which is what decides whether a match fell off the right crop.
+    disp_offset: float = 0.0
 
 
 @dataclass

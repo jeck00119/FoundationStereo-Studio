@@ -167,7 +167,13 @@ def build_cloud(
     # -- left eye -------------------------------------------------------
     depth_L = result.depth.copy()
     if params.remove_invisible:
-        depth_L[(xx - disp_L) < 0] = 0
+        # "Did this pixel's match fall off the left edge of the right image?" is a
+        # question about the columns the NETWORK saw, so it uses the OBSERVED
+        # disparity — true disparity minus any pre-shift. With a Δ of ~400 px and
+        # a 1024-wide ROI, testing the true disparity would declare the left 400
+        # columns invisible and delete most of the ROI, even though the shifted
+        # right crop contains every one of those matches.
+        depth_L[(xx - (disp_L - np.float32(result.disp_offset))) < 0] = 0
     pts, cols, ori, rel = _project_side(
         depth_L, result.rgb, K, z_near, z_far, tx=0.0, origin=0, reliable=rel_L
     )

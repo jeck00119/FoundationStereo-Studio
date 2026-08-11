@@ -263,3 +263,120 @@ def test_disparity_saturation_detector(qapp):
     assert 0.28 < sat < 0.32
     assert MainWindow._disparity_saturation(d, None) == 0.0    # model without the knob
     assert MainWindow._disparity_saturation(np.zeros((4, 4), np.float32), 192) == 0.0
+
+
+# ------------------------------------------------------------------- ROI box
+def _roi_view(qapp, W=4024, H=3036):
+    from studio.viewers import ImageView2D
+    v = ImageView2D(scalar=False, pair=True)
+    img = np.random.default_rng(1).integers(0, 255, (H, W, 3), dtype=np.uint8)
+    v.set_pair(img, img.copy())
+    return v
+
+
+def test_roi_snaps_to_32_and_stays_inside_the_image(qapp):
+    """What you SEE must be what gets cropped — so the snap happens on the box,
+    not silently at run time."""
+    v = _roi_view(qapp)
+    seen = []
+    v.roiChanged.connect(seen.append)
+    v.roi_chk.setChecked(True)
+    v.roi.setPos([1590, 1180]); v.roi.setSize([870, 700]); v._sync_roi()
+    x0, y0, w, h = seen[-1]
+    assert (x0 % 32, y0 % 32, w % 32, h % 32) == (0, 0, 0, 0)
+    assert x0 + w <= 4024 and y0 + h <= 3036
+    # the drawn box is moved to match what was reported
+    assert (int(v.roi.pos()[0]), int(v.roi.size()[0])) == (x0, w)
+
+
+def test_roi_clamped_when_dragged_off_the_edge(qapp):
+    v = _roi_view(qapp)
+    seen = []
+    v.roiChanged.connect(seen.append)
+    v.roi_chk.setChecked(True)
+    v.roi.setPos([3900, 2900]); v.roi.setSize([900, 900]); v._sync_roi()
+    x0, y0, w, h = seen[-1]
+    assert x0 >= 0 and y0 >= 0
+    assert x0 + w <= 4024 and y0 + h <= 3036
+
+
+def test_roi_emits_none_when_switched_off(qapp):
+    v = _roi_view(qapp)
+    seen = []
+    v.roiChanged.connect(seen.append)
+    v.roi_chk.setChecked(True)
+    assert seen[-1] is not None
+    v.roi_chk.setChecked(False)
+    assert seen[-1] is None
+
+
+def test_roi_is_hidden_on_the_right_image(qapp):
+    """The right crop sits Δ px away, so the same rectangle over the right view
+    would point at the wrong pixels."""
+    v = _roi_view(qapp)
+    v.roi_chk.setChecked(True)
+    assert v.roi.isVisible()
+    v._show_side("right")
+    assert not v.roi.isVisible()
+    v._show_side("left")
+    assert v.roi.isVisible()
+
+
+def test_roi_controls_lock_for_a_batch(qapp):
+    v = _roi_view(qapp)
+    v.roi_chk.setChecked(True)
+    v.set_roi_enabled(False)
+    assert not v.roi_chk.isEnabled() and not v.shift_btn.isEnabled()
+    assert v.roi.translatable is False
+    v.set_roi_enabled(True)
+    assert v.roi_chk.isEnabled() and v.shift_btn.isEnabled()
+
+
+def test_set_roi_restores_without_re_emitting(qapp):
+    """Restoring a saved ROI at startup must not look like a user edit (which
+    would drop the saved Δ that was measured for it)."""
+    v = _roi_view(qapp)
+    seen = []
+    v.roiChanged.connect(seen.append)
+    v.set_roi((1600, 1184, 864, 704))
+    assert seen == []
+    assert v.roi_chk.isChecked() and v.roi.isVisible()
+    assert (int(v.roi.pos()[0]), int(v.roi.size()[1])) == (1600, 704)
+
+
+def test_roi_resyncs_when_a_pair_loads(qapp):
+    """Two ways the box goes stale: ticked before any image existed (no size, so
+    nothing was ever emitted), and a differently-sized pair arriving under a box
+    that now hangs off the edge."""
+    from studio.viewers import ImageView2D
+    v = ImageView2D(scalar=False, pair=True)
+    seen = []
+    v.roiChanged.connect(seen.append)
+    v.roi_chk.setChecked(True)          # ticked with NO image loaded
+    assert seen[-1] is None
+    img = np.random.default_rng(3).integers(0, 255, (3036, 4024, 3), dtype=np.uint8)
+    v.set_pair(img, img.copy())
+    assert seen[-1] is not None         # now it has a size and announces one
+    x0, y0, w, h = seen[-1]
+    assert x0 + w <= 4024 and y0 + h <= 3036
+
+    small = np.zeros((512, 640, 3), np.uint8)
+    v.set_pair(small, small.copy())     # a much smaller pair
+    x0, y0, w, h = seen[-1]
+    assert x0 + w <= 640 and y0 + h <= 512
+
+
+def test_reloading_the_same_size_pair_keeps_the_roi_identical(qapp):
+    """A re-emitted IDENTICAL rectangle is how a measured Δ survives a reload."""
+    from studio.viewers import ImageView2D
+    v = ImageView2D(scalar=False, pair=True)
+    img = np.random.default_rng(4).integers(0, 255, (600, 800, 3), dtype=np.uint8)
+    v.set_pair(img, img.copy())
+    v.roi_chk.setChecked(True)
+    v.roi.setPos([160, 96]); v.roi.setSize([256, 192]); v._sync_roi()
+    before = (int(v.roi.pos()[0]), int(v.roi.pos()[1]),
+              int(v.roi.size()[0]), int(v.roi.size()[1]))
+    seen = []
+    v.roiChanged.connect(seen.append)
+    v.set_pair(img.copy(), img.copy())
+    assert seen[-1] == before

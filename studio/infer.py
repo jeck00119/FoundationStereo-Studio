@@ -31,6 +31,26 @@ def run_inference(
     scale = float(params.scale)
     img0 = np.ascontiguousarray(left_rgb[..., :3])
     img1 = np.ascontiguousarray(right_rgb[..., :3])
+
+    # The ROI crop is INPUT PREPARATION and has already happened by here —
+    # rectify.crop_pair, or Rectifier.rectify_roi on the cheap path — for the same
+    # reason rectification itself does: it belongs with whoever holds the full
+    # frame. Doing it in this function would mean shipping 73 MB per pair to the
+    # engine child only to throw 98 % of it away (measured: 296 ms of socket time
+    # per pair, 10 min across a 2000-capture study).
+    #
+    # What survives here is the bookkeeping the network's OUTPUT needs: Δ.
+    # Derived from params rather than passed in, so it cannot drift from the crop.
+    shift_px = params.effective_shift
+    if shift_px and params.dual_reference:
+        # The flip trick assumes both images share one coordinate frame. A
+        # pre-shift breaks that, and the right-reference pass would come back
+        # offset by Δ with nothing to say so — silently wrong geometry rather
+        # than a visible failure. Refuse instead.
+        raise ValueError(
+            "Dual reference cannot be combined with a disparity pre-shift "
+            "(disp_shift > 0). Turn one of them off.")
+
     if scale != 1.0:
         img0 = cv2.resize(img0, None, fx=scale, fy=scale)
         img1 = cv2.resize(img1, None, fx=scale, fy=scale)
@@ -42,6 +62,16 @@ def run_inference(
     dres = backend.disparity(img0, img1, params)
     disp = dres.disp
     confidence = dres.confidence
+
+    # Undo the pre-shift: the network saw the right crop already displaced by Δ,
+    # so it reports d_observed = d_true − Δ. Add it back (at working scale) and
+    # everything downstream — depth, the cloud, the boxes — sees true disparity.
+    # Only where the match is VALID: disp == 0 is this pipeline's "no match", and
+    # adding Δ to it would promote every hole into a plausible-looking depth.
+    disp_offset = float(shift_px) * scale
+    if disp_offset:
+        disp = np.where(disp > 0, disp + np.float32(disp_offset), np.float32(0.0)
+                        ).astype(np.float32)
 
     disp_right = None
     rgb_right = None
@@ -73,4 +103,5 @@ def run_inference(
         H=H, W=W, scale=scale, timing=timing, K=K,
         baseline=float(params.baseline),
         disp_right=disp_right, rgb_right=rgb_right, confidence=confidence,
+        disp_offset=disp_offset,
     )
