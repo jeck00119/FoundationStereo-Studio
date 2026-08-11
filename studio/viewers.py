@@ -17,7 +17,7 @@ from .compare import ComparePanel
 from .dtypes import UNIT_DECIMALS
 from .repeat import RepeatabilityView
 from .web_cloud import WebCloudView
-from .widgets import ModelBar
+from .widgets import ModelBar, no_wheel
 
 pg.setConfigOptions(imageAxisOrder="row-major", antialias=True)
 
@@ -42,6 +42,7 @@ class ImageView2D(QWidget):
     pixelClicked = Signal(int, int)  # image x, y — a left-click inside the image
     roiChanged = Signal(object)     # (x0, y0, w, h) in LEFT-image pixels, or None
     findShiftRequested = Signal()   # "Find shift" pressed (the window does the match)
+    siteMarked = Signal(str, int, int)   # ("pin"|"ref", x, y) in LEFT-image pixels
 
     def __init__(self, scalar: bool = True, unit: str = "", pair: bool = False,
                  dec: int = 2, parent=None) -> None:
@@ -150,6 +151,24 @@ class ImageView2D(QWidget):
             self.shift_btn.clicked.connect(self.findShiftRequested)
             self.roi_lbl = QLabel("")
             self.roi_lbl.setProperty("role", "muted")
+            # --- study sites: the pins to measure and what to measure them
+            # AGAINST. Marked on the IMAGE, not in 3D: the measurement tracks
+            # them per capture and takes the difference within one frame, which
+            # is what makes it immune to the rig's frame drift and to the
+            # baseline variation that swamps absolute depth.
+            self.mark_combo = no_wheel(QComboBox())
+            self.mark_combo.addItems(["Mark: off", "Mark: pin", "Mark: reference"])
+            self.mark_combo.setToolTip(
+                "Click the image to mark measurement sites.\n\n"
+                "PIN — a feature whose height you want.\n"
+                "REFERENCE — a nearby textured surface to measure it against; each "
+                "pin uses the closest one.\n\nPick references with TEXTURE: bare "
+                "solder mask reconstructs poorly and makes a noisy reference.")
+            self.sites_lbl = QLabel("no sites")
+            self.sites_lbl.setProperty("role", "muted")
+            self.sites_clear = QPushButton("Clear sites")
+            self.sites_clear.setToolTip("Remove every marked pin and reference.")
+            self.sites_clear.clicked.connect(self.clear_sites)
             bar.addWidget(QLabel("View"))
             bar.addWidget(self.btn_left)
             bar.addWidget(self.btn_right)
@@ -157,7 +176,10 @@ class ImageView2D(QWidget):
             bar.addWidget(self.guide_chk)
             bar.addWidget(self.roi_chk)
             bar.addWidget(self.shift_btn)
+            bar.addWidget(self.mark_combo)
+            bar.addWidget(self.sites_clear)
             bar.addStretch(1)
+            bar.addWidget(self.sites_lbl)
             bar.addWidget(self.roi_lbl)
             bar.addWidget(self.side_lbl)
             # The box itself. Snapped to a multiple of 32 (see _sync_roi) because
@@ -170,6 +192,11 @@ class ImageView2D(QWidget):
             self.roi.hide()
             self.vb.addItem(self.roi)
             self.roi.sigRegionChangeFinished.connect(self._sync_roi)
+            self._sites: list = []            # [{"kind","x","y","name"}]
+            self._site_dots = pg.ScatterPlotItem(size=15, pen=pg.mkPen("#0b0d12", width=2))
+            self._site_dots.setZValue(25)
+            self.vb.addItem(self._site_dots)
+            self._site_texts: list = []
         else:
             bar.addStretch(1)
 
@@ -205,8 +232,13 @@ class ImageView2D(QWidget):
         if ev.button() != Qt.LeftButton:
             return
         px = self._pixel_at(ev.scenePos())
-        if px is not None:
-            self.pixelClicked.emit(px[0], px[1])
+        if px is None:
+            return
+        kind = self._mark_kind()
+        if kind:                     # marking mode owns the click
+            self.siteMarked.emit(kind, px[0], px[1])
+            return
+        self.pixelClicked.emit(px[0], px[1])
 
     # ------------------------------------------------------------- data in
     def _set_rgb(self, arr: np.ndarray) -> None:
@@ -279,6 +311,70 @@ class ImageView2D(QWidget):
             # no change — so a measured Δ survives an ordinary pair reload.
             self.roi.setVisible(self.roi_chk.isChecked())
             self._sync_roi()
+
+    # ---------------------------------------------------------------- sites
+    #: marker colours — pins warm, references cool, so a glance says which is which
+    SITE_RGB = {"pin": "#f4883f", "ref": "#5ac8fa"}
+
+    def _mark_kind(self) -> str:
+        """'pin' | 'ref' | '' — what a click on the image would mark."""
+        if not hasattr(self, "mark_combo"):
+            return ""
+        i = self.mark_combo.currentIndex()
+        return {1: "pin", 2: "ref"}.get(i, "")
+
+    def add_site(self, kind: str, x: int, y: int, name: str = "") -> dict:
+        """Record a marked site (LEFT-image pixels) and draw it."""
+        n = sum(1 for s in self._sites if s["kind"] == kind) + 1
+        site = {"kind": kind, "x": int(x), "y": int(y),
+                "name": name or (f"Pin {n}" if kind == "pin" else f"Ref {n}")}
+        self._sites.append(site)
+        self._redraw_sites()
+        return site
+
+    def clear_sites(self) -> None:
+        self._sites = []
+        self._redraw_sites()
+
+    def sites(self) -> list:
+        return [dict(s) for s in self._sites]
+
+    def set_sites(self, sites) -> None:
+        """Restore saved sites WITHOUT re-emitting — this is not a user edit."""
+        self._sites = [{"kind": s.get("kind", "pin"), "x": int(s["x"]),
+                        "y": int(s["y"]), "name": s.get("name", "")}
+                       for s in (sites or []) if "x" in s and "y" in s]
+        self._redraw_sites()
+
+    def _redraw_sites(self) -> None:
+        for t in self._site_texts:
+            self.vb.removeItem(t)
+        self._site_texts = []
+        if not self._sites:
+            self._site_dots.setData([], [])
+            self.sites_lbl.setText("no sites")
+            return
+        spots = [{"pos": (s["x"], s["y"]), "brush": pg.mkBrush(self.SITE_RGB[s["kind"]]),
+                  "symbol": "o" if s["kind"] == "pin" else "s"} for s in self._sites]
+        self._site_dots.setData(spots)
+        for s in self._sites:
+            t = pg.TextItem(s["name"], color=self.SITE_RGB[s["kind"]], anchor=(0, 1.2))
+            t.setPos(s["x"], s["y"])
+            t.setZValue(26)
+            self.vb.addItem(t, ignoreBounds=True)
+            self._site_texts.append(t)
+        npins = sum(1 for s in self._sites if s["kind"] == "pin")
+        nref = len(self._sites) - npins
+        plural = "s" if npins != 1 else ""
+        self.sites_lbl.setText(f"{npins} pin{plural} · {nref} ref")
+
+    def set_sites_enabled(self, on: bool) -> None:
+        """Lock marking while a batch owns the geometry."""
+        if hasattr(self, "mark_combo"):
+            self.mark_combo.setEnabled(on)
+            self.sites_clear.setEnabled(on)
+            if not on:
+                self.mark_combo.setCurrentIndex(0)
 
     # ------------------------------------------------------------------- ROI
     def _img_size(self):

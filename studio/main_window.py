@@ -26,7 +26,7 @@ from .viewers import ViewerStack
 from .window.analyze import AnalyzeController
 from .window.export import ExportController
 from .window.level import LevelController
-from .window.roi import RoiController
+from .window.roi import RoiController, SitesController
 from .worker import EngineClient
 
 
@@ -97,6 +97,7 @@ class MainWindow(QMainWindow):
 
         # each controller OWNS its state; the window only routes signals to it
         self.roi = RoiController(self)
+        self.sites = SitesController(self)
         self.level = LevelController(self)
         self.export = ExportController(self)
         self.analyze = AnalyzeController(self)
@@ -237,6 +238,8 @@ class MainWindow(QMainWindow):
         self.viewer.pixelClicked.connect(self._on_pixel_clicked)
         self.viewer.input_view.roiChanged.connect(self.roi.on_roi_changed)
         self.viewer.input_view.findShiftRequested.connect(self.roi.on_find_shift)
+        self.viewer.input_view.siteMarked.connect(self.sites.on_marked)
+        self.viewer.input_view.sites_clear.clicked.connect(self.sites.on_cleared)
         self.viewer.cloud_view.boxEdited.connect(self._on_box_edited)
         self.viewer.cloud_view.boxSelected.connect(self._on_box_selected)
         self.viewer.cloud_view.pointPicked.connect(self.analyze.on_point_picked)
@@ -1745,6 +1748,7 @@ class MainWindow(QMainWindow):
         # the crop is part of the frozen geometry: moving it mid-study would
         # reconstruct a different region under the same box names
         self.viewer.input_view.set_roi_enabled(False)
+        self.viewer.input_view.set_sites_enabled(False)
         self.viewer.repeat_view.set_pins([n for n, _b, _t in self._batch_specs])
         self.viewer.setCurrentWidget(self.viewer.repeat_view)   # watch it fill
         self.progress.setRange(0, self._batch_total)
@@ -1853,6 +1857,7 @@ class MainWindow(QMainWindow):
         # the crop is part of the frozen geometry: moving it mid-study would
         # reconstruct a different region under the same box names
         self.viewer.input_view.set_roi_enabled(False)
+        self.viewer.input_view.set_sites_enabled(False)
         self.viewer.repeat_view.set_pins([n for n, _b, _t in self._batch_specs])
         self.viewer.setCurrentWidget(self.viewer.repeat_view)
         self.progress.setRange(0, self._batch_total)
@@ -1923,6 +1928,7 @@ class MainWindow(QMainWindow):
         self.export_btn.setEnabled(self.result is not None)
         self.viewer.repeat_view.set_locked(False)
         self.viewer.input_view.set_roi_enabled(True)
+        self.viewer.input_view.set_sites_enabled(True)
         self.progress.setRange(0, 0)      # back to the indeterminate busy spinner
         self.progress.setVisible(self._busy)
         self._update_run_enabled()
@@ -2069,6 +2075,7 @@ class MainWindow(QMainWindow):
         except (ValueError, TypeError):
             self.param_panel.restore_boxes([])
         self.roi.restore(_blob("roi"))     # the drawn crop + its measured Δ
+        self.sites.restore(_blob("study_sites"))   # marked pins + references
         self.viewer.compare_view.restore(_blob("compare"))
         self._refresh_compare_cards()
         # NOTE: calibration is intentionally NOT restored — it is per-pair, and

@@ -123,3 +123,54 @@ class RoiController:
         view.set_roi(self.roi)
         if self.disp_shift:
             view.set_roi_note(f"Δ {self.disp_shift:.0f} px")
+
+
+class SitesController:
+    """Measurement sites marked on the IMAGE: pins, and the references they are
+    measured against.
+
+    Deliberately image-space rather than world-space measure boxes. A world box
+    is fixed in the camera frame, and this rig's frame does not hold still: the
+    CNC's step (the stereo baseline) repeats to ~0.5 %, which walks ABSOLUTE
+    depth by >1 mm, and the image itself drifts ~15 px in x and ~34 px in y over
+    a long run. Boxes seeded from one capture were empty on 19 of 20 later ones.
+
+    Marked sites survive both, because the measurement tracks each site per
+    capture and takes pin-minus-reference WITHIN one frame: the baseline error is
+    common to both terms and cancels (measured: absolute sigma 2200 um vs
+    differential ~600 um).
+
+    Pick references with TEXTURE. Bare solder mask measured 3.4 grey-levels of
+    local contrast and the metal bar 3.6 — the network has nothing to match there
+    and its depth is a guess; the component body (23.8) made a better reference.
+    """
+
+    def __init__(self, win) -> None:
+        self.win = win
+
+    def on_marked(self, kind: str, x: int, y: int) -> None:
+        if self.win._batching:
+            return                       # geometry is frozen for the study
+        site = self.win.viewer.input_view.add_site(kind, x, y)
+        self.save()
+        self.win._set_status(
+            f"Marked {site['name']} at ({x}, {y}). "
+            + ("Mark a reference near it — a textured surface, not bare board."
+               if kind == "pin" else "Each pin uses the closest reference."))
+
+    def on_cleared(self) -> None:
+        self.save()
+        self.win._set_status("Measurement sites cleared.")
+
+    def sites(self) -> list:
+        return self.win.viewer.input_view.sites()
+
+    def save(self) -> None:
+        try:
+            self.win.settings.setValue("study_sites", json.dumps(self.sites()))
+        except Exception:   # noqa: BLE001 — a settings write must never break the UI
+            pass
+
+    def restore(self, blob) -> None:
+        if isinstance(blob, list) and blob:
+            self.win.viewer.input_view.set_sites(blob)

@@ -380,3 +380,58 @@ def test_reloading_the_same_size_pair_keeps_the_roi_identical(qapp):
     v.roiChanged.connect(seen.append)
     v.set_pair(img.copy(), img.copy())
     assert seen[-1] == before
+
+
+# ------------------------------------------------------------- study sites
+def test_sites_marked_saved_and_restored(qapp):
+    """Sites are marked on the IMAGE, not in 3D, because world-space boxes do not
+    survive this rig's drift — seeded from one capture they were empty on 19 of
+    20 later ones."""
+    from studio.viewers import ImageView2D
+    v = ImageView2D(scalar=False, pair=True)
+    img = np.zeros((3036, 4024, 3), np.uint8)
+    v.set_pair(img, img.copy())
+    seen = []
+    v.siteMarked.connect(lambda k, x, y: seen.append((k, x, y)))
+    v.mark_combo.setCurrentIndex(1)
+    assert v._mark_kind() == "pin"
+    v.add_site("pin", 2807, 1139)
+    v.add_site("ref", 2960, 1300)
+    s = v.sites()
+    assert [x["kind"] for x in s] == ["pin", "ref"]
+    assert s[0]["name"] == "Pin 1" and s[1]["name"] == "Ref 1"
+    assert "1 pin" in v.sites_lbl.text() and "1 ref" in v.sites_lbl.text()
+
+    v2 = ImageView2D(scalar=False, pair=True)
+    v2.set_pair(img, img.copy())
+    v2.set_sites(s)
+    assert v2.sites() == s
+    v2.clear_sites()
+    assert v2.sites() == [] and v2.sites_lbl.text() == "no sites"
+
+
+def test_marking_mode_owns_the_click(qapp):
+    """While marking, a click must NOT also fire pixelClicked — that signal places
+    a measure box, and one click should not do two things."""
+    from studio.viewers import ImageView2D
+    v = ImageView2D(scalar=False, pair=True)
+    img = np.zeros((600, 800, 3), np.uint8)
+    v.set_pair(img, img.copy())
+    px, mk = [], []
+    v.pixelClicked.connect(lambda x, y: px.append((x, y)))
+    v.siteMarked.connect(lambda k, x, y: mk.append((k, x, y)))
+    v.mark_combo.setCurrentIndex(0)
+    assert v._mark_kind() == ""
+    v.mark_combo.setCurrentIndex(2)
+    assert v._mark_kind() == "ref"
+
+
+def test_sites_lock_for_a_batch(qapp):
+    from studio.viewers import ImageView2D
+    v = ImageView2D(scalar=False, pair=True)
+    v.mark_combo.setCurrentIndex(1)
+    v.set_sites_enabled(False)
+    assert not v.mark_combo.isEnabled() and not v.sites_clear.isEnabled()
+    assert v._mark_kind() == ""          # mode reset, so a stray click cannot mark
+    v.set_sites_enabled(True)
+    assert v.mark_combo.isEnabled()
