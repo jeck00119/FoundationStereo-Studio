@@ -128,7 +128,8 @@ class _Bridge(QObject):
 
 
 class WebCloudView(QWidget):
-    """3D point cloud + measure-box gizmo. Public surface matches CloudView3D."""
+    """3D point cloud + measure-box gizmo. Public surface matches the pyqtgraph
+    CloudView3D this replaced (see the module docstring) — that class is gone."""
 
     overlayToggled = Signal(bool)
     boxEdited = Signal(int, object, bool)   # (box index, world MeasureBox, final?)

@@ -84,12 +84,17 @@ Full app press-to-cloud ≈ 3 s. Scale rule: needed disparity ≈ scale × 546 p
 ≤ max_disp. Orin ≈ 7.7× slower than the PC's 3060 at identical config.
 
 **Ceilings (measured, do not re-litigate)**: TRT engines cannot exceed
-scale 0.30 on 8 GB — at ≥0.35 trtexec dies at `PWN(/Mul_1)` wanting
-4.1–4.7 GB for materialized cost-volume ops (this is also NVlabs issue
-#43's unexplained report). PyTorch reaches 0.40 engine-only but is
-OOM-adjacent with the GUI up; 0.50·416 is kernel-OOM-killed. **Next project
-if >0.30 is ever needed here: upstream's TRT plugin path (PR #55, fused GWC
-kernel).** Until then 0.35+ belongs to the Windows machine.
+scale 0.30 on 8 GB — at ≥0.35 every tactic for one fused cost-volume op
+wants 4.1–4.7 GB against the ~2.6 GB actually free, and trtexec gives up on
+that node (this is also NVlabs issue #43's unexplained report). The node and
+error code vary with size, so recognise the pattern, not the string: 832×960
+· d224 died at `PWN(/Mul_1)`, 4.29 GB, Error 10 (insufficient device memory);
+928×1088 · d256 at a longer fused `PWN(...)` chain, 4.65 GB, Error 4
+(insufficient workspace). Both logs are kept beside the engines.
+PyTorch reaches 0.40 engine-only but is OOM-adjacent with the GUI up;
+0.50·416 is kernel-OOM-killed. **Next project if >0.30 is ever needed here:
+upstream's TRT plugin path (PR #55, fused GWC kernel).** Until then 0.35+
+belongs to the Windows machine.
 
 **TRT engine cache**: per (padded size · iters · max_disp) under
 `weights/<run>/trt/`, survives reboots. A new size builds once — ~1¾ h at
