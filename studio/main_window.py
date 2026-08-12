@@ -86,6 +86,8 @@ class MainWindow(QMainWindow):
         self._batch_queue: list = []       # pairs: [(label,l,r)] · clouds: [(label,path)]
         self._batch_label = ""             # the item currently in flight
         self._batch_specs: list = []       # boxes frozen at batch start
+        self._batch_sites: list = []       # marked sites frozen at batch start
+        self._batch_templates: dict = {}   # per-site tracking templates
         self._batch_params = None          # the scene (calibration+cloud), frozen
         self._batch_file_factor = 1.0      # clouds: file-unit -> working-unit scale
         self._cloud_shown = False          # clouds: shown one cloud for confirmation yet
@@ -1669,11 +1671,19 @@ class MainWindow(QMainWindow):
         if not self.input_panel.has_calibration:
             return False, ("Batch needs calibration for depth. Load K.txt (or type "
                            "fx/baseline) so each pair builds a 3D cloud.")
-        if not self.param_panel.measure_on or not self.param_panel.has_boxes():
-            return False, ("Place your measure boxes first: turn on the Volume box and "
-                           "drop one box on each pin. The batch measures those same "
-                           "boxes on every capture.")
+        if not self._have_measurement_targets():
+            return False, ("Mark what to measure first: on the Input tab set "
+                           "'Mark: pin' and click each pin, then 'Mark: reference' "
+                           "and click a textured surface near them. (Measure boxes "
+                           "also work, but sites survive this rig's drift and boxes "
+                           "do not.)")
         return True, ""
+
+    def _have_measurement_targets(self) -> bool:
+        """Something to measure: marked sites (preferred) or measure boxes."""
+        pins = [s for s in self.sites.sites() if s["kind"] == "pin"]
+        return bool(pins) or (self.param_panel.measure_on
+                              and self.param_panel.has_boxes())
 
     def _open_batch(self) -> None:
         if self._batching:                       # already running — surface the monitor
@@ -1691,12 +1701,14 @@ class MainWindow(QMainWindow):
         # Both sources measure the SAME boxes, so a box on each pin is the one thing
         # needed to even open. Model + calibration are checked per-source at Run
         # (stereo pairs need them; saved clouds are already reconstructed, so don't).
-        if not self.param_panel.measure_on or not self.param_panel.has_boxes():
+        if not self._have_measurement_targets():
             QMessageBox.information(
-                self, "Batch — place your boxes first",
-                "Turn on the Volume box and drop one box on each pin — the batch "
-                "measures those same boxes on every capture.\n\nTo place boxes you "
-                "need a cloud on screen, so run one pair first.")
+                self, "Batch — mark what to measure first",
+                "On the Input tab: set 'Mark: pin' and click each pin, then "
+                "'Mark: reference' and click a TEXTURED surface near them (bare "
+                "solder mask reconstructs poorly and makes a noisy reference).\n\n"
+                "Measure boxes still work for saved-cloud batches, but for image "
+                "pairs sites are what survive this rig's drift.")
             return
         dlg = BatchDialog(self._units, self)
         dlg._on_run_cb = self._start_batch
@@ -1733,6 +1745,20 @@ class MainWindow(QMainWindow):
         self._batch_failed = []
         self._batch_params = self._current_params()        # scene frozen for the run
         self._batch_specs = self.param_panel.box_specs()   # boxes frozen for the run
+        # Marked sites take precedence over measure boxes. Boxes are fixed in the
+        # camera frame, which this rig does not hold still — seeded from one
+        # capture they were empty on 19 of 20 later ones. Sites are tracked per
+        # capture and differenced within the frame, so they survive the drift.
+        # Templates come from the SHOWN result, i.e. the capture you set up on.
+        self._batch_sites = self.sites.sites() if self._batch_kind == "pairs" else []
+        self._batch_templates = {}
+        if self._batch_sites and self.result is not None:
+            from .sites_measure import make_templates
+            self._batch_templates = make_templates(
+                self.result.rgb, self._batch_sites,
+                self._batch_params.roi, self._batch_params.scale)
+        if self._batch_sites and not self._batch_templates:
+            self._batch_sites = []      # nothing trackable — fall back to boxes
         self._reset_cloud_view = True
         # lock the scene — no image/model/box/unit change mid-study. The study's
         # own buttons and Export lock too: Log would inject a mislabeled row,
@@ -1749,7 +1775,9 @@ class MainWindow(QMainWindow):
         # reconstruct a different region under the same box names
         self.viewer.input_view.set_roi_enabled(False)
         self.viewer.input_view.set_sites_enabled(False)
-        self.viewer.repeat_view.set_pins([n for n, _b, _t in self._batch_specs])
+        self.viewer.repeat_view.set_pins(
+            [s["name"] for s in self._batch_sites if s["kind"] == "pin"]
+            if self._batch_sites else [n for n, _b, _t in self._batch_specs])
         self.viewer.setCurrentWidget(self.viewer.repeat_view)   # watch it fill
         self.progress.setRange(0, self._batch_total)
         self.progress.setValue(0)
@@ -1800,10 +1828,27 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._batch_next)
 
     def _batch_log(self, cloud) -> None:
-        """Measure every frozen box against `cloud` and log one capture (trimmed
-        height per pin, canonical metres) into the Repeatability table."""
+        """Log one capture's readings into the Repeatability table.
+
+        With sites marked this measures pin-minus-reference from the DEPTH MAP —
+        tracked per capture, differenced inside the frame — which is the only
+        form that survives this rig (absolute σ 2200 µm vs ~600 µm differential).
+        With none marked it falls back to the measure boxes."""
         inv = 1.0 / UNIT_PER_M[self._units]
         vals = {}
+        if self._batch_sites and self.result is not None:
+            from .sites_measure import measure_sites
+            got = measure_sites(self.result.rgb, self.result.depth,
+                                self._batch_sites, self._batch_templates,
+                                self._batch_params.roi, self._batch_params.scale)
+            for name, rec in got.items():
+                h = rec["height"]
+                vals[name] = float(h) * inv if np.isfinite(h) else None
+            self.viewer.repeat_view.add_record(self._batch_label, vals)
+            self._batch_logged += 1
+            if not any(v is not None for v in vals.values()):
+                self._batch_empty += 1
+            return
         for name, box, trim in self._batch_specs:
             m = measure_box(cloud.points, box, trim_pct=trim)
             vals[name] = m["h_span_t"] * inv if m is not None else None
