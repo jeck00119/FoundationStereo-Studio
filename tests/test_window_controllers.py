@@ -171,6 +171,15 @@ def test_batch_refuses_sites_without_a_reference_capture(win):
     iv.add_site("pin", 100, 100)
     iv.add_site("ref", 200, 200)
     assert win._have_marked_pins() and win._have_measurement_targets()
+    # _batch_ready reports the FIRST unmet precondition, and "no model" comes
+    # before "no reference capture" — correctly, you do need a model first. So
+    # satisfy the earlier gates to reach the one under test.
+    win._model_ready = True
+    win._needs_load = lambda: False
+    win.input_panel.fx.setValue(21103.6)
+    win.input_panel.baseline.setValue(5.1785)
+    assert win.input_panel.has_calibration
     win.result = None
     ok, why = win._batch_ready()
-    assert not ok and "Run once first" in why
+    assert not ok, why
+    assert "Run once first" in why
