@@ -325,3 +325,36 @@ def test_cached_engine_sizes_survives_a_missing_directory():
 
     assert cached_engine_sizes("/nope/model.pth") == set()
     assert cached_engine_sizes("") == set()
+
+
+# --------------------------------------------- engine building is opt-in
+def test_trt_backend_declares_itself_linux_only():
+    """It looked READY on Windows and then failed when the child tried to import
+    the bindings. A platform it cannot run on should read as unavailable."""
+    from studio.backends import BACKENDS
+
+    spec = BACKENDS["fast_foundation_stereo_trt"]
+    assert spec.platforms == ("posix",)
+    assert "build_engine" in [p.key for p in spec.params]
+    assert [p for p in spec.params if p.key == "build_engine"][0].default is False
+
+
+def test_every_other_backend_runs_anywhere():
+    """Only the ENGINE is TensorRT-specific — the ROI crop, the pre-shift, the
+    sites and the measurement are backend-agnostic, so nothing else should be
+    platform-gated."""
+    from studio.backends import BACKENDS
+
+    for key, spec in BACKENDS.items():
+        if key != "fast_foundation_stereo_trt":
+            assert spec.platforms is None, key
+
+
+def test_the_roi_pipeline_names_no_backend():
+    """The whole point: switching backend must not change the measurement. If a
+    backend name appears in these modules, that has stopped being true."""
+    import re
+    for mod in ("rectify", "infer", "sites_measure", "cloud", "measure"):
+        src = open(f"studio/{mod}.py").read()
+        hits = re.findall(r"tensorrt|fast_fs|foundation_stereo|backend_key", src)
+        assert not hits, f"studio/{mod}.py mentions {set(hits)}"

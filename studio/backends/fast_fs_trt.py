@@ -303,11 +303,31 @@ class FastFsTrtBackend(StereoBackend):
                          f"TRT {label}: {el / 60:.0f} min — {note}")
             return p.returncode
 
-    def _ensure_runner(self, hp: int, wp: int, iters: int, max_disp: int) -> None:
+    def _ensure_runner(self, hp: int, wp: int, iters: int, max_disp: int,
+                       may_build: bool = False) -> None:
         key = (hp, wp, iters, max_disp)
         if self._runner is not None and self._runner_key == key:
             return
         engine_path = self._engine_path(hp, wp, iters, max_disp)
+        if not os.path.isfile(engine_path) and not may_build:
+            # Building takes the better part of an hour and used to start with no
+            # more warning than a status line. It is opt-in now, and refusing has
+            # to say what the alternatives ARE — switching backend costs nothing,
+            # since only the engine is TensorRT-specific.
+            have = sorted(os.path.basename(f) for f in
+                          __import__("glob").glob(os.path.join(
+                              os.path.dirname(engine_path), "*.engine")))
+            raise RuntimeError(
+                f"No TensorRT engine for {wp}×{hp} at iters {iters}, max_disp "
+                f"{max_disp}, and 'Build engine if missing' is off.\n\n"
+                "Either:\n"
+                "  • switch to Fast-FoundationStereo (PyTorch) — same weights, "
+                "same result, no engine needed; or\n"
+                "  • resize the crop to a size that already has an engine; or\n"
+                "  • turn on 'Build engine if missing' and run again "
+                "(~76 min on this device, one time).\n\n"
+                + ("Engines already built:\n  " + "\n  ".join(have) if have
+                   else "No engines are built for this checkpoint yet."))
         if not os.path.isfile(engine_path):
             os.makedirs(os.path.dirname(engine_path), exist_ok=True)
             onnx_path = engine_path.replace(".engine", ".onnx")
@@ -350,7 +370,8 @@ class FastFsTrtBackend(StereoBackend):
         t0, t1 = padder.pad(t0, t1)
         hp, wp = int(t0.shape[-2]), int(t0.shape[-1])
 
-        self._ensure_runner(hp, wp, iters, max_disp)
+        self._ensure_runner(hp, wp, iters, max_disp,
+                            may_build=bool(mp.get("build_engine", False)))
         out = self._runner.infer({"left_image": t0.contiguous(),
                                   "right_image": t1.contiguous()})
         d = padder.unpad(out["disparity"].float())

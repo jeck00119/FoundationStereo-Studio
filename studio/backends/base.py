@@ -70,6 +70,11 @@ class BackendSpec:
     repo_dir: Optional[str] = None   # prepended to sys.path in the child before import
     python_exe: Optional[str] = None  # interpreter for the child (None = the app's own)
     description: str = ""
+    #: os.name values this backend can run on, or None for any. Checked in
+    #: availability() so a backend that CANNOT work here reads as unavailable in
+    #: the picker instead of looking ready and failing when the engine child
+    #: tries to import its bindings.
+    platforms: Optional[tuple] = None
 
     def default_checkpoint(self) -> Optional[CheckpointSpec]:
         for c in self.checkpoints:
@@ -82,6 +87,9 @@ class BackendSpec:
 
     def availability(self) -> tuple[bool, str]:
         """(usable, reason) — best-effort, cheap checks only (no imports)."""
+        if self.platforms and os.name not in self.platforms:
+            return False, ("not available on this platform "
+                           f"(needs {'/'.join(self.platforms)})")
         if self.repo_dir and not os.path.isdir(self.repo_dir):
             return False, f"repo not found: {self.repo_dir}"
         if self.python_exe and not os.path.isfile(self.python_exe):

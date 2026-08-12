@@ -149,7 +149,18 @@ FAST_FS_TRT = BackendSpec(
                           "changing it builds a new engine once (minutes). Memory and "
                           "speed scale with it; 192 px covers downscaled pairs "
                           "(rig rule: needed ≈ scale × 546 px)."),
+        ParamSpec("build_engine", "Build engine if missing", "toggle", False,
+                  tooltip="OFF (default): only run sizes that already have an "
+                          "engine, and say so otherwise. ON: build one when a new "
+                          "size is needed — measured at ~76 minutes on this "
+                          "device, during which the app is unusable.\n\n"
+                          "TensorRT is purely a SPEED optimisation for Jetson "
+                          "(1.30 s vs 1.93 s at the device config). Everything "
+                          "else — the ROI crop, the pre-shift, the marked sites, "
+                          "the measurement — is backend-agnostic, so the PyTorch "
+                          "backend gives the same answer with no engine at all."),
     ],
+    platforms=("posix",),   # the bindings only exist on Jetson/Linux
     description="Fast-FoundationStereo compiled to a TensorRT FP16 engine (upstream's "
                 "single-ONNX export). The fast path on Jetson. Engines are device- and "
                 "size-specific: the FIRST run at a new size/disparity builds one — "
