@@ -158,3 +158,19 @@ def test_roi_reaches_the_run_params(win):
     assert p.roi == (128, 64, 256, 192)
     assert p.disp_shift == 400.0
     assert p.effective_shift == 128.0          # clamped to x0, one source of truth
+
+
+def test_batch_refuses_sites_without_a_reference_capture(win):
+    """Templates are cut from the SHOWN result. With none, the batch would fall
+    back to measure boxes and every reading would come back empty — fail where
+    the reason can still be explained."""
+    import numpy as np
+    iv = win.viewer.input_view
+    img = np.zeros((600, 800, 3), np.uint8)
+    iv.set_pair(img, img.copy())
+    iv.add_site("pin", 100, 100)
+    iv.add_site("ref", 200, 200)
+    assert win._have_marked_pins() and win._have_measurement_targets()
+    win.result = None
+    ok, why = win._batch_ready()
+    assert not ok and "Run once first" in why

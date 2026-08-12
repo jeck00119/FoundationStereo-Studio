@@ -1671,6 +1671,14 @@ class MainWindow(QMainWindow):
         if not self.input_panel.has_calibration:
             return False, ("Batch needs calibration for depth. Load K.txt (or type "
                            "fx/baseline) so each pair builds a 3D cloud.")
+        if self._have_marked_pins() and self.result is None:
+            # Site tracking cuts its templates from the SHOWN result. Without one
+            # there is nothing to cut, and the batch would quietly fall back to
+            # measure boxes — which on this rig means every reading comes back
+            # empty. Fail here, where the reason can still be explained.
+            return False, ("Run once first. Site tracking needs a reference "
+                           "capture to cut its templates from — load your setup "
+                           "pair, press Run, then start the batch.")
         if not self._have_measurement_targets():
             return False, ("Mark what to measure first: on the Input tab set "
                            "'Mark: pin' and click each pin, then 'Mark: reference' "
@@ -1678,6 +1686,9 @@ class MainWindow(QMainWindow):
                            "also work, but sites survive this rig's drift and boxes "
                            "do not.)")
         return True, ""
+
+    def _have_marked_pins(self) -> bool:
+        return any(s["kind"] == "pin" for s in self.sites.sites())
 
     def _have_measurement_targets(self) -> bool:
         """Something to measure: marked sites (preferred) or measure boxes."""
