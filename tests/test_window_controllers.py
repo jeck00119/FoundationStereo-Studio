@@ -203,7 +203,7 @@ def test_moving_the_roi_remeasures_the_shift_itself(win, monkeypatch):
     monkeypatch.setattr("studio.rectify.find_disparity_shift", fake)
     win.roi.on_roi_changed((2560, 1024, 512, 1024))
     assert calls == [(2560, 1024, 512, 1024)]
-    assert win.roi.disp_shift == 511.0 - win.roi.SHIFT_MARGIN_PX
+    assert win.roi.disp_shift == 511.0 - win.roi.shift_margin()
 
     win.roi.on_roi_changed((1728, 448, 512, 1024))      # user drags it elsewhere
     assert calls[-1] == (1728, 448, 512, 1024)
@@ -227,3 +227,20 @@ def test_a_textureless_roi_reports_instead_of_raising(win, monkeypatch):
     win.roi.on_roi_changed((100, 100, 256, 256))
     assert boom == []                       # no modal
     assert win.roi.disp_shift == 0.0
+
+
+def test_shift_margin_centres_the_observed_band(win):
+    """Δ must land the observed disparity in the MIDDLE of the search range.
+    Measured on 20 real captures at max_disp 64: margin 24 gave a band starting
+    at 1.5 px and σ 2284 µm; margin 41 gave 18..49 and σ 435 µm."""
+    from studio.panels import set_param_widgets
+    win.input_panel.restore_selection("fast_foundation_stereo_trt", "")
+    win.param_panel.set_backend(win.input_panel.current_spec())
+    set_param_widgets(win.param_panel._dyn_widgets, {"valid_iters": 8, "max_disp": 64})
+    m = win.roi.shift_margin()
+    assert m == pytest.approx(0.6 * 64)
+    # a measured disparity of 511 then leaves the band centred, not at an edge
+    observed = 511.0 - (511.0 - m)
+    assert 0.25 * 64 < observed < 0.75 * 64
+    set_param_widgets(win.param_panel._dyn_widgets, {"valid_iters": 8, "max_disp": 192})
+    assert win.roi.shift_margin() == pytest.approx(0.6 * 192)

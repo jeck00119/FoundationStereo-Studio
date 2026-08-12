@@ -18,11 +18,30 @@ class RoiController:
     ``roi`` · ``disp_shift`` · ``dispatch_pair()`` · ``on_roi_changed()`` ·
     ``on_find_shift()`` · ``save()`` · ``restore()``."""
 
-    #: how far under the measured disparity Δ is placed, in full-res px. The
-    #: match reports the disparity at ONE depth; parts stand proud of it, and a Δ
-    #: past the smallest disparity present would clip the far end of the scene to
-    #: zero — which reads as "no match" rather than "too far".
-    SHIFT_MARGIN_PX = 24.0
+    #: Δ is placed this FRACTION of max_disp below the measured disparity, so the
+    #: observed band lands in the MIDDLE of the search range rather than near an
+    #: edge. Both edges are bad and for different reasons: near 0 the cost volume
+    #: has no room below the match and the network's estimates get unreliable;
+    #: near max_disp it saturates outright.
+    #:
+    #: A fixed 24 px margin was the first attempt and it was measurably wrong.
+    #: On 20 real captures at max_disp 64 (observed p1..p99, then pin-height σ):
+    #:    Δ 487 (margin 24)   1.5 .. 76.0    2284 µm / 748 µm
+    #:    Δ 470 (margin 41)  18.0 .. 48.6     435 µm / 497 µm
+    #:    Δ 455 (margin 56)  30.0 .. 74.4     846 µm / 1135 µm
+    #: A margin near 0.6·max_disp centres it. It is biased slightly HIGH on
+    #: purpose: this rig's disparity drifts DOWNWARD over a long run (511 -> 492
+    #: across 1000 captures), which pushes the observed band toward zero, so the
+    #: room belongs at the bottom.
+    SHIFT_MARGIN_FRAC = 0.6
+    SHIFT_MARGIN_MIN = 24.0
+
+    def shift_margin(self) -> float:
+        try:
+            md = float((self.win._current_params().model_params or {}).get("max_disp", 64))
+        except Exception:   # noqa: BLE001 — a margin must never break the UI
+            md = 64.0
+        return max(self.SHIFT_MARGIN_MIN, self.SHIFT_MARGIN_FRAC * md)
 
     def __init__(self, win) -> None:
         self.win = win
@@ -106,7 +125,7 @@ class RoiController:
                 "to match. Draw the box over the parts you measure — pins, "
                 "silkscreen, connectors — not a bare area of board.")
             return False
-        self.disp_shift = max(0.0, float(r["shift"]) - self.SHIFT_MARGIN_PX)
+        self.disp_shift = max(0.0, float(r["shift"]) - self.shift_margin())
         win._mark_stale()
         self.save()
         note = f"Δ {self.disp_shift:.0f}  ·  m{r['score']:.2f}"
