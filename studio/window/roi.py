@@ -27,7 +27,8 @@ class RoiController:
     def __init__(self, win) -> None:
         self.win = win
         self.roi: tuple | None = None    # (x0, y0, w, h), rectified full-res px
-        self.disp_shift: float = 0.0     # Δ, measured by "Find shift"
+        self.disp_shift: float = 0.0     # Δ, measured automatically when roi moves
+        self.last_note = ""              # the measured-shift half of the ROI label
 
     # ------------------------------------------------------------- dispatch
     def dispatch_pair(self, params):
@@ -58,46 +59,108 @@ class RoiController:
         same = (roi == self.roi)
         self.roi = tuple(roi) if roi is not None else None
         if not same:
+            # Δ belonged to the OLD rectangle, so it cannot be kept — but making
+            # the user re-press a button for it was a trap: the run then saturates
+            # and the failure looks like a disparity-range problem. Measuring it
+            # is a ~100 ms template match on images already in memory, so just do
+            # it. Moving the box is the normal action; it should not break a run.
             self.disp_shift = 0.0
             self.win._mark_stale()
+            if self.roi is not None:
+                self.measure_shift(quiet=True)
         self.save()
+        self.refresh_note()
 
     def on_find_shift(self) -> None:
+        """The manual re-measure. Δ is measured automatically whenever the box
+        moves; this is for when the pair changed under a box that did not."""
+        self.measure_shift(quiet=False)
+
+    def measure_shift(self, quiet: bool = False) -> bool:
         """Measure Δ by matching the ROI's pixels in the right image."""
         from ..rectify import find_disparity_shift
 
         win = self.win
         if self.roi is None:
-            win._set_status("Draw an ROI first.")
-            return
+            if not quiet:
+                win._set_status("Draw an ROI first.")
+            return False
         left, right = win.input_panel.left_rgb, win.input_panel.right_rgb
         if left is None or right is None:
-            win._set_status("Load a pair first — the shift is measured from the images.")
-            return
+            if not quiet:
+                win._set_status("Load a pair first — the shift is measured from the images.")
+            return False
         r = find_disparity_shift(left, right, self.roi)
         view = win.viewer.input_view
         if not r["ok"]:
-            view.set_roi_note("no confident match")
+            self.last_note = "no shift — move onto the parts"
+            self.refresh_note()
+            if quiet:      # auto-measure: a bad spot mid-drag is not an error
+                win._set_status(
+                    "No confident match for this region — it needs texture. "
+                    "Move the box onto the parts you measure.")
+                return False
             win._report_error(
                 f"Couldn't measure the shift for this ROI (confidence "
                 f"{r['score']:.2f}).\n\nThe region probably has too little texture "
                 "to match. Draw the box over the parts you measure — pins, "
                 "silkscreen, connectors — not a bare area of board.")
-            return
+            return False
         self.disp_shift = max(0.0, float(r["shift"]) - self.SHIFT_MARGIN_PX)
         win._mark_stale()
         self.save()
-        note = f"Δ {self.disp_shift:.0f} px  ·  match {r['score']:.2f}"
+        note = f"Δ {self.disp_shift:.0f}  ·  m{r['score']:.2f}"
+        self.last_note = note
+        self.refresh_note()
         if abs(r["dy"]) > 2:
-            note += f"  ·  row offset {r['dy']:+d} px"
             win._set_status(
                 f"Shift found, but the match sits {r['dy']:+d} px off its own row — "
                 "a rectified pair should be row-aligned. Check the calibration.")
-        else:
+        elif not quiet:
             win._set_status(
                 f"Shift {self.disp_shift:.0f} px (matched {r['shift']:.0f}, "
                 f"confidence {r['score']:.2f}). Run to reconstruct just this region.")
-        view.set_roi_note(note)
+        return True
+
+    # ------------------------------------------------------- engine readiness
+    def engine_ready(self):
+        """Is a TRT engine already built for this crop? None when the question
+        does not apply (another backend, or no ROI yet)."""
+        from ..backends.registry import cached_engine_sizes, padded_size
+
+        win = self.win
+        if self.roi is None:
+            return None
+        try:
+            if win.input_panel.current_backend_key() != "fast_foundation_stereo_trt":
+                return None
+            p = win._current_params()
+            hp, wp = padded_size(self.roi[2], self.roi[3], p.scale)
+            mp = p.model_params or {}
+            key = (hp, wp, int(mp.get("valid_iters", 8)), int(mp.get("max_disp", 192)))
+            return key in cached_engine_sizes(win.input_panel.current_checkpoint_path())
+        except Exception:   # noqa: BLE001 — a label must never break the UI
+            return None
+
+    def refresh_note(self) -> None:
+        """The ROI label: the measured shift, and — the part that saves an
+        afternoon — whether this SIZE already has an engine.
+
+        Only the SIZE decides, never the position, so dragging the box around the
+        board is always free; a resize is what can cost an hour. Saying so on the
+        label is the difference between that being obvious and being a surprise.
+        """
+        view = self.win.viewer.input_view
+        if self.roi is None:
+            view.set_roi_note("")
+            return
+        bits = [self.last_note]
+        ready = self.engine_ready()
+        if ready is True:
+            bits.append("engine ✓")
+        elif ready is False:
+            bits.append("⚠ new size — first run builds an engine (~1 h)")
+        view.set_roi_note("  ·  ".join(b for b in bits if b))
 
     # ----------------------------------------------------------- persistence
     def save(self) -> None:
@@ -119,10 +182,10 @@ class RoiController:
         except (TypeError, ValueError):   # a bad blob must not wedge startup
             self.roi, self.disp_shift = None, 0.0
             return
-        view = self.win.viewer.input_view
-        view.set_roi(self.roi)
+        self.win.viewer.input_view.set_roi(self.roi)
         if self.disp_shift:
-            view.set_roi_note(f"Δ {self.disp_shift:.0f} px")
+            self.last_note = f"Δ {self.disp_shift:.0f}"
+        self.refresh_note()
 
 
 class SitesController:

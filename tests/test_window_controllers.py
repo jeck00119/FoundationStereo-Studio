@@ -183,3 +183,47 @@ def test_batch_refuses_sites_without_a_reference_capture(win):
     ok, why = win._batch_ready()
     assert not ok, why
     assert "Run once first" in why
+
+
+def test_moving_the_roi_remeasures_the_shift_itself(win, monkeypatch):
+    """Moving the box is the NORMAL action and must not break a run. Δ belongs to
+    the old rectangle so it cannot be kept — but making the user re-press a button
+    meant the next run saturated and the failure looked like a disparity-range
+    problem. It is a ~100 ms image match; just do it."""
+    import numpy as np
+    img = np.zeros((3036, 4024, 3), np.uint8)
+    win.input_panel.left_rgb = img
+    win.input_panel.right_rgb = img.copy()
+    calls = []
+
+    def fake(left, right, roi, **kw):
+        calls.append(tuple(roi))
+        return {"shift": 511.0, "score": 0.95, "texture": 30.0, "dy": 0, "ok": True}
+
+    monkeypatch.setattr("studio.rectify.find_disparity_shift", fake)
+    win.roi.on_roi_changed((2560, 1024, 512, 1024))
+    assert calls == [(2560, 1024, 512, 1024)]
+    assert win.roi.disp_shift == 511.0 - win.roi.SHIFT_MARGIN_PX
+
+    win.roi.on_roi_changed((1728, 448, 512, 1024))      # user drags it elsewhere
+    assert calls[-1] == (1728, 448, 512, 1024)
+    assert win.roi.disp_shift > 0                        # NOT left at zero
+
+    win.roi.on_roi_changed((1728, 448, 512, 1024))       # same rect: no re-measure
+    assert len(calls) == 2
+
+
+def test_a_textureless_roi_reports_instead_of_raising(win, monkeypatch):
+    """Auto-measure runs mid-drag, so a bad spot must be a status line, never a
+    modal error box."""
+    import numpy as np
+    win.input_panel.left_rgb = np.zeros((600, 800, 3), np.uint8)
+    win.input_panel.right_rgb = np.zeros((600, 800, 3), np.uint8)
+    monkeypatch.setattr("studio.rectify.find_disparity_shift",
+                        lambda *a, **k: {"shift": 0.0, "score": 0.1,
+                                         "texture": 1.0, "dy": 0, "ok": False})
+    boom = []
+    monkeypatch.setattr(win, "_report_error", lambda m: boom.append(m))
+    win.roi.on_roi_changed((100, 100, 256, 256))
+    assert boom == []                       # no modal
+    assert win.roi.disp_shift == 0.0

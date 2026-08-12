@@ -212,3 +212,40 @@ def load_backend(key: str) -> StereoBackend:
         sys.path.insert(0, spec.repo_dir)
     mod = importlib.import_module(spec.adapter_module)
     return mod.make()
+
+
+def cached_engine_sizes(ckpt_path: str) -> set:
+    """{(padded_h, padded_w, iters, max_disp)} already built for this checkpoint.
+
+    TensorRT engines are per-size, and building one takes the better part of an
+    hour on an 8 GB Jetson — so the difference between "drag the box" and "drag
+    the box and lose an afternoon" is invisible unless the UI says which sizes
+    are ready. Read from the filenames the TRT adapter writes; a missing or
+    unreadable directory just means "none", never an error.
+    """
+    import re
+
+    if not ckpt_path:
+        return set()
+    d = os.path.join(os.path.dirname(ckpt_path), "trt")
+    out = set()
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return out
+    for n in names:
+        m = re.match(r"fp16_(\d+)x(\d+)_i(\d+)_d(\d+)_trt[\d.]+\.engine$", n)
+        if m:
+            out.add(tuple(int(g) for g in m.groups()))
+    return out
+
+
+def padded_size(w: int, h: int, scale: float, divis: int = 32) -> tuple:
+    """(padded_h, padded_w) the network will actually see for a w×h crop.
+
+    Mirrors run_inference's resize followed by InputPadder: the engine is keyed
+    by the PADDED size, so this is what decides whether one already exists.
+    """
+    sw, sh = int(round(w * scale)), int(round(h * scale))
+    ceil = lambda v: max(divis, -(-v // divis) * divis)   # noqa: E731
+    return ceil(sh), ceil(sw)

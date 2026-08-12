@@ -291,3 +291,37 @@ def test_saturation_advice_differs_for_an_unshifted_roi():
     assert sat(true_disp, 64) == pytest.approx(1.0)        # unshifted: pinned
     assert sat(true_disp, 416) == pytest.approx(1.0)       # even at the slider max
     assert sat(true_disp - 470.0, 64) == 0.0               # shifted: fine
+
+
+# ----------------------------------------------- engine readiness by SIZE
+def test_padded_size_matches_the_engine_key():
+    """The engine is keyed by the PADDED size, which is what decides whether
+    dragging the box costs an hour. Must mirror run_inference + InputPadder."""
+    from studio.backends.registry import padded_size
+
+    assert padded_size(512, 1024, 1.0) == (1024, 512)      # already /32
+    assert padded_size(800, 704, 1.0) == (704, 800)
+    assert padded_size(4024, 3036, 0.30) == (928, 1216)    # the rig's full frame
+    assert padded_size(500, 1000, 1.0) == (1024, 512)      # rounds UP to /32
+
+
+def test_cached_engine_sizes_reads_the_filenames(tmp_path):
+    from studio.backends.registry import cached_engine_sizes
+
+    d = tmp_path / "weights" / "run"
+    (d / "trt").mkdir(parents=True)
+    (d / "trt" / "fp16_1024x512_i8_d64_trt10.3.engine").write_bytes(b"x")
+    (d / "trt" / "fp16_704x800_i8_d192_trt10.3.engine").write_bytes(b"x")
+    (d / "trt" / "fp16_832x960_i8_d224_trt10.3.engine.build.log").write_text("failed")
+    ck = str(d / "model.pth")
+    got = cached_engine_sizes(ck)
+    assert (1024, 512, 8, 64) in got and (704, 800, 8, 192) in got
+    assert (832, 960, 8, 224) not in got        # a build LOG is not an engine
+    assert len(got) == 2
+
+
+def test_cached_engine_sizes_survives_a_missing_directory():
+    from studio.backends.registry import cached_engine_sizes
+
+    assert cached_engine_sizes("/nope/model.pth") == set()
+    assert cached_engine_sizes("") == set()
