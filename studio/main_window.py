@@ -2123,6 +2123,7 @@ class MainWindow(QMainWindow):
         self.param_panel.restore_all(_blob("model_params"))
         self.param_panel.set_backend(self.input_panel.current_spec())
         self.param_panel.restore_section_states(_blob("sections_param"))
+        self.param_panel.restore_scene_state(_blob("scene"))   # scale, z-clip, denoise
         self.input_panel.restore_section_states(_blob("sections_input"))
         self.input_panel.restore_rect_state(_blob("rectify"))   # raw-mode + calib path
         self.level.restore(_blob("level"))
@@ -2168,7 +2169,8 @@ class MainWindow(QMainWindow):
                           ("sections_param", self.param_panel.section_states),
                           ("sections_input", self.input_panel.section_states),
                           ("rectify", self.input_panel.rect_state),
-                          ("level", self.level.state)):
+                          ("level", self.level.state),
+                          ("scene", self.param_panel.scene_state)):
             try:   # never let a settings blob block the app from closing
                 s.setValue(name, json.dumps(get()))
             except Exception:   # noqa: BLE001

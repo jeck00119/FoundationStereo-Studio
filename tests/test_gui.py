@@ -4,6 +4,7 @@ ToggleSwitch state sync. One shared QApplication (conftest.qapp)."""
 import csv
 
 import numpy as np
+import pytest
 
 
 # --------------------------------------------------------- render_rgb / NaN
@@ -435,3 +436,47 @@ def test_sites_lock_for_a_batch(qapp):
     assert v._mark_kind() == ""          # mode reset, so a stray click cannot mark
     v.set_sites_enabled(True)
     assert v.mark_combo.isEnabled()
+
+
+def test_scene_settings_survive_a_restart(qapp):
+    """scale / z-clip / denoise were never persisted: every launch silently reset
+    them to 0.5, 0/250 and denoise-on, changing what a measurement means. The
+    per-model knobs DID persist, which is what made the omission easy to miss."""
+    from studio.panels import ParamPanel
+    p = ParamPanel()
+    p.scale.setValue(1.0)
+    p.z_near.setValue(180.0)
+    p.z_far.setValue(260.0)
+    p.denoise.setChecked(False)
+    blob = p.scene_state()
+    assert blob["scale"] == 1.0 and blob["denoise"] is False
+    assert blob["unit"] == "mm"
+
+    q = ParamPanel()
+    assert q.scale.value() != 1.0 or q.denoise.isChecked()    # defaults differ
+    q.restore_scene_state(blob)
+    assert q.scale.value() == pytest.approx(1.0)
+    assert q.z_near.value() == pytest.approx(180.0)
+    assert q.z_far.value() == pytest.approx(260.0)
+    assert q.denoise.isChecked() is False
+
+
+def test_scene_restore_rescales_the_z_clip_across_units(qapp):
+    """A z-clip saved in mm and read back as µm would clip the whole cloud away."""
+    from studio.panels import ParamPanel
+    p = ParamPanel()
+    p.z_near.setValue(180.0); p.z_far.setValue(260.0)
+    blob = p.scene_state()                       # mm
+    q = ParamPanel()
+    q.set_units("µm")
+    q.restore_scene_state(blob)
+    assert q.z_far.value() == pytest.approx(260_000.0, rel=1e-6)
+
+
+def test_scene_restore_survives_a_junk_blob(qapp):
+    from studio.panels import ParamPanel
+    p = ParamPanel()
+    before = p.scale.value()
+    for junk in (None, [], {"scale": "not a number"}, {"z_far": None}):
+        p.restore_scene_state(junk)
+    assert p.scale.value() == before

@@ -371,6 +371,49 @@ class ParamPanel(QWidget):
             model_params=self.model_params(),
         )
 
+    def scene_state(self) -> dict:
+        """The SCENE settings, for persistence — scale, the z-clip and denoise.
+
+        These were never saved: every launch reset scale to 0.5, denoise to on
+        and the z-clip to 0/250, silently changing what a measurement means. The
+        per-MODEL knobs already persisted, which made the omission easy to miss.
+        Values are in the CURRENT display unit, so the unit is stored beside them
+        and the restore rescales (z-clip in mm read back as µm would clip
+        everything away)."""
+        return {"scale": self.scale.value(), "unit": self._units,
+                "z_near": self.z_near.value(), "z_far": self.z_far.value(),
+                "denoise": self.denoise.isChecked(),
+                "denoise_std": self.denoise_std.value(),
+                "denoise_nb": self.denoise_nb.value(),
+                "dual_reference": self.dual_ref.isChecked(),
+                "remove_invisible": self.remove_invisible.isChecked()}
+
+    def restore_scene_state(self, blob) -> None:
+        """Reload the scene settings. Forgiving: a stale or partial blob leaves
+        the untouched knobs at their defaults rather than wedging the panel."""
+        if not isinstance(blob, dict):
+            return
+        f = UNIT_PER_M[self._units] / UNIT_PER_M.get(blob.get("unit", self._units),
+                                                     UNIT_PER_M[self._units])
+        try:
+            if "scale" in blob:
+                self.scale.setValue(float(blob["scale"]))
+            for key, w in (("z_near", self.z_near), ("z_far", self.z_far)):
+                if key in blob:
+                    w.setValue(float(blob[key]) * f)     # stored unit -> current
+            if "denoise" in blob:
+                self.denoise.setChecked(bool(blob["denoise"]))
+            if "denoise_std" in blob:
+                self.denoise_std.setValue(float(blob["denoise_std"]))
+            if "denoise_nb" in blob:
+                self.denoise_nb.setValue(float(blob["denoise_nb"]))
+            if "dual_reference" in blob:
+                self.dual_ref.setChecked(bool(blob["dual_reference"]))
+            if "remove_invisible" in blob:
+                self.remove_invisible.setChecked(bool(blob["remove_invisible"]))
+        except (TypeError, ValueError):   # a bad blob must not wedge startup
+            pass
+
     def build_params(self, calibration: dict) -> StereoParams:
         return StereoParams(**self.values(), **calibration)
 
