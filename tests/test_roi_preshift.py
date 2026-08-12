@@ -277,3 +277,17 @@ def test_crop_pair_passthrough_never_touches_the_images():
     assert a is None and b is None
     a, b = crop_pair(None, None, None)
     assert a is None and b is None
+
+
+def test_saturation_advice_differs_for_an_unshifted_roi():
+    """A cropped run with no pre-shift saturates ANY max_disp — the rig's absolute
+    disparity (~500 px) exceeds the slider's own maximum (416). Telling the user
+    to raise it is advice that cannot work AND starts an hour-long engine build;
+    the fix is Find shift."""
+    from studio.main_window import MainWindow
+
+    sat = MainWindow._disparity_saturation
+    true_disp = np.full((64, 64), 500.0, np.float32)
+    assert sat(true_disp, 64) == pytest.approx(1.0)        # unshifted: pinned
+    assert sat(true_disp, 416) == pytest.approx(1.0)       # even at the slider max
+    assert sat(true_disp - 470.0, 64) == 0.0               # shifted: fine

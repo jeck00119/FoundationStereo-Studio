@@ -1209,6 +1209,25 @@ class MainWindow(QMainWindow):
         if d.size == 0:
             return
         need = int(np.ceil(float(np.percentile(d, 99)) * 1.15 / 32.0) * 32)
+        # An ROI with no pre-shift saturates ANY sane max_disp: this rig's absolute
+        # disparity is ~500 px while max_disp tops out at 416, and the whole point
+        # of the pre-shift is that only the few px of VARIATION need searching. The
+        # generic "raise Max disparity" advice is actively harmful here — it cannot
+        # work, and changing max_disp builds a new engine (over an hour).
+        if self.roi.roi is not None and not off:
+            self._set_status("Disparity saturated — press Find shift, then Run.")
+            QMessageBox.warning(
+                self, "Press Find shift first",
+                f"{sat:.0%} of the crop is pinned at the top of the disparity "
+                f"search range, because this ROI has no measured shift yet.\n\n"
+                "The two views are offset by roughly 500 px here, and Max "
+                "disparity only goes to 416 — so raising it cannot fix this (and "
+                "would start a new engine build). Instead press FIND SHIFT: it "
+                "measures the offset from the images and pre-aligns the right "
+                "crop, leaving only the few px that actually vary.\n\n"
+                "Moving the ROI clears the shift on purpose — it belonged to the "
+                "old rectangle.")
+            return
         msg = (f"{sat:.0%} of the image is pinned at the top of the disparity search "
                f"range (Max disparity {int(md)} px at this scale). Those regions come "
                f"out as smeared streaks, not real depth.\n\n"
