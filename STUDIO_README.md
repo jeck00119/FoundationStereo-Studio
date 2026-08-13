@@ -15,6 +15,19 @@ and your captures (`data/` is ignored apart from `data/calib/*.json`).
 `tools/check_setup.py` checks every one of those and prints the fix for each —
 run it first, fix what it lists, run it again until it says `Ready`.
 
+**The short way — one script does all of it:**
+
+```
+git clone https://github.com/jeck00119/FoundationStereo-Studio.git FoundationStereo
+cd FoundationStereo && python install.py
+```
+
+`install.py` clones the sibling model repo, fetches the weights, builds the
+environment for THIS platform, verifies with `check_setup.py` + the test suite,
+and drops a desktop launcher (`.desktop` on Linux, `.lnk` on Windows). It is
+idempotent and asks before the two slow steps, so re-run it after fixing
+whatever it stops on. The manual sequence below is the same thing by hand.
+
 **1. Both repos, side by side**
 
 ```

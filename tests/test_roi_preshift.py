@@ -398,3 +398,66 @@ def test_setup_check_runs_and_reports():
     assert r.returncode in (0, 1), r.stderr[-500:]
     for expected in ("Python", "torch", "triton", "PySide6", "backend"):
         assert expected in r.stdout, expected
+
+
+# ------------------------------------------------------------- installer
+def _installer():
+    import importlib.util
+    sp = importlib.util.spec_from_file_location("inst", "install.py")
+    m = importlib.util.module_from_spec(sp)
+    sp.loader.exec_module(m)
+    return m
+
+
+def test_installer_resolves_the_sibling_repo_not_a_subdir():
+    """The single thing a fresh clone gets wrong: Fast-FoundationStereo is a
+    SIBLING, not a submodule or a subdirectory."""
+    import os
+    m = _installer()
+    assert os.path.dirname(m.FAST_REPO) == os.path.dirname(m.REPO)
+    assert not m.FAST_REPO.startswith(m.REPO + os.sep)
+    assert m.WEIGHTS_DIR.startswith(m.FAST_REPO)
+
+
+def test_installer_detects_this_platform():
+    m = _installer()
+    import os
+    assert m.IS_WIN == (os.name == "nt")
+    assert m.IS_JETSON == (os.name != "nt" and os.path.exists("/etc/nv_tegra_release"))
+    # the venv interpreter must be the one this platform actually uses
+    assert m.VPY.endswith("python.exe" if m.IS_WIN else "python")
+
+
+def test_installer_steps_are_no_ops_when_already_satisfied():
+    """Idempotent: re-running after a fix must skip what is done, never redo a
+    68 MB download or re-clone over an existing repo."""
+    import contextlib, io, os
+    m = _installer()
+    if not os.path.isdir(os.path.join(m.FAST_REPO, ".git")):
+        pytest.skip("sibling repo not present on this machine")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        m.sibling_repo(True)
+        m.weights(True)
+    out = buf.getvalue()
+    assert "present" in out
+    assert "downloading" not in out and "git clone" not in out
+
+
+def test_installer_writes_a_launcher_matching_the_rig(tmp_path, monkeypatch):
+    import os
+    m = _installer()
+    if m.IS_WIN:
+        pytest.skip("Linux .desktop path")
+    home = tmp_path / "home"
+    (home / "Desktop").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(os.path, "expanduser", lambda p: p.replace("~", str(home)))
+    m.desktop_icon()
+    entry = home / "Desktop" / "FoundationStereo Studio.desktop"
+    assert entry.exists()
+    text = entry.read_text()
+    for key in ("Type=Application", "Name=FoundationStereo Studio",
+                "Exec=", "Path=", "Icon=", "Terminal=false"):
+        assert key in text, key
+    assert os.access(entry, os.X_OK)      # launchers must be executable
