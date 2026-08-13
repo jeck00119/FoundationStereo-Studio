@@ -123,20 +123,30 @@ Load the resulting `calib.json` in the app's **"Raw — rectify with
 calibration"** mode (baseline unit = your `--unit`). `k_rectified.txt` is only
 for images already rectified offline — never for raw captures.
 
-## Current rig quick-start (Basler acA4024 + 35 mm lens, ~200 mm distance)
+## Current rig quick-start (Basler acA4024 + 35 mm lens)
 
-Raw—rectify + `data\calib\calib_provisional.json` (mm) · z-near **195** /
-z-far **208 mm** · Denoise on · per-machine inference settings:
+Raw—rectify + `data/calib/calib_provisional.json` (mm). Measured on this rig,
+not inherited: rectified fx **21103.6**, baseline **5.1785 mm**, working
+distance **211–223 mm**.
 
-- **Windows (12 GB card):** Input scale **0.50** · Max disparity **416**
-- **Orin Nano (8 GB):** Input scale **0.30** · Max disparity **192** —
-  measured 2026-07-22: 1.8 s/run, 2.6 GB RAM floor with the whole app up;
-  the Windows 0.50 · 416 profile OOM-kills this device (see the Jetson
-  section + CLAUDE.md for the full table)
+| setting | value | why |
+|---|---|---|
+| rectify mode | Raw — rectify with calibration | the ROI is drawn on the RECTIFIED image |
+| Input scale | **1.00** | the ROI is what makes full resolution fit |
+| Max disparity | **64** | the pre-shift leaves only the few px that vary |
+| ROI | 512×1024, over the parts | ≤563k px, the only size proven to build an engine here |
+| z-near / z-far | **180 / 260 mm** | must bracket 211–223; the old 195/208 returns an EMPTY cloud |
+| Denoise | **off** | 3.5 s/pair on this device and buys ~0.4 µm — the 2 % trim already removes flyers |
 
-Rule of thumb: this scene needs ≈ scale × 546 px of disparity — keep Max
-disparity above that (the app warns on saturation). The z-clip removes
-out-of-focus tall structures the optics cannot measure (DOF ≈ 1–3 mm).
+**Why not "scale 0.30 · max_disp 192"?** That was the setting before the ROI
+existed, when the whole frame had to be shrunk to fit. It still works, and it is
+what a full-frame run needs — but it resolves 208 µm per 0.1 px against the
+ROI's 42 µm, for more memory. The old rule of thumb (needed disparity ≈
+scale × 546 px) applies only WITHOUT a pre-shift; with one, `max_disp` covers
+the scene's disparity SPAN (~30 px here), not its absolute value (~500 px).
+
+The z-clip also removes out-of-focus tall structures the optics cannot measure
+(DOF ≈ 1–3 mm).
 
 ## Measuring pin heights over a capture run
 
@@ -195,8 +205,9 @@ See **Deploy on a new machine** above for the full sequence; on a Jetson it is
 
 Notes for the Orin Nano 8 GB (unified CPU+GPU memory):
 - **Fast-FoundationStereo is the practical model** — FoundationStereo ViT-L
-  does not fit. Use **Input scale 0.30 · Max disparity 192** (measured
-  device default; the Windows 0.50 · 416 profile gets OOM-killed).
+  does not fit. With an ROI use **scale 1.00 · Max disparity 64** (see the
+  quick-start above); for a whole-frame run, **scale 0.30 · Max disparity 192**
+  is the device default and the Windows 0.50 · 416 profile gets OOM-killed.
 - **The TensorRT backend is the Orin default**: same accuracy as the
   PyTorch backend (median 0.034 px difference), **1.30 s vs 1.93 s** per
   run at the device config, ~5 s cold start with no warm-up. First run at a
