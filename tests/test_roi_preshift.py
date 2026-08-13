@@ -461,3 +461,32 @@ def test_installer_writes_a_launcher_matching_the_rig(tmp_path, monkeypatch):
                 "Exec=", "Path=", "Icon=", "Terminal=false"):
         assert key in text, key
     assert os.access(entry, os.X_OK)      # launchers must be executable
+
+
+def test_triton_resolves_correctly_on_every_platform():
+    """Triton is the memory budget, not a speed knob — eager costs 4.2x. Each
+    platform needs a DIFFERENT source, and aarch64 must resolve to nothing here
+    because PyPI has no Jetson build (setup_jetson.sh uses the Jetson index)."""
+    from packaging.markers import Marker
+
+    lines = [l.split(";") for l in open("requirements.txt")
+             if l.startswith("triton")]
+    def resolve(env):
+        return [l[0].strip() for l in lines if Marker(l[1].strip()).evaluate(env)]
+
+    win = resolve({"sys_platform": "win32", "platform_machine": "AMD64"})
+    lin = resolve({"sys_platform": "linux", "platform_machine": "x86_64"})
+    jet = resolve({"sys_platform": "linux", "platform_machine": "aarch64"})
+    assert len(win) == 1 and win[0].startswith("triton-windows")
+    assert len(lin) == 1 and lin[0].startswith("triton>")
+    assert jet == [], "aarch64 must NOT pull a PyPI triton — it cannot serve the iGPU"
+
+
+def test_both_launchers_refuse_without_a_venv():
+    """A launcher that silently does nothing is worse than one that says why."""
+    sh = open("run_studio.sh").read()
+    bat = open("run_studio.bat").read()
+    for name, text in (("run_studio.sh", sh), ("run_studio.bat", bat)):
+        assert ".venv" in text, name
+        assert "install.py" in text or "setup_jetson.sh" in text, name
+    assert "exit /b 1" in bat and "exit 1" in sh

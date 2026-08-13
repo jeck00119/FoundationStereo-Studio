@@ -21,6 +21,11 @@
 # this range pairs with the torch 2.7.0 pinned in the header above. (Pinned from
 # that coupling, not from a Windows machine — verify on first install.)
 triton-windows>=3.3,<3.4 ; sys_platform == "win32"
+# Desktop Linux (x86_64) uses the ordinary PyPI package. aarch64 is EXCLUDED on
+# purpose: PyPI has no Jetson build, so setup_jetson.sh installs it from the
+# Jetson wheel index instead — a marker-less line would drag in a wheel that
+# does not serve the Tegra iGPU.
+triton>=3.3,<3.4 ; sys_platform == "linux" and platform_machine == "x86_64"
 
 # GUI
 PySide6==6.11.1            # incl. Essentials + Addons (QtWebEngine for the 3D view)
