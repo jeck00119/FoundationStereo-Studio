@@ -367,12 +367,14 @@ def test_unavailable_backends_say_what_to_do():
     from studio.backends.base import BackendSpec, CheckpointSpec
 
     gone = BackendSpec(key="x", display_name="X", adapter_module="m",
-                       repo_dir="/nonexistent/Some-Repo", checkpoints=[])
+                       repo_dir="/nonexistent/Some-Repo", checkpoints=[],
+                       params=[])
     ok, why = gone.availability()
     assert not ok and "clone it next to this repo" in why and "/nonexistent" in why
 
     noweights = BackendSpec(key="y", display_name="Y", adapter_module="m",
-                            checkpoints=[CheckpointSpec("c", "/nonexistent/w.pth")])
+                            checkpoints=[CheckpointSpec("c", "/nonexistent/w.pth")],
+                            params=[])
     ok, why = noweights.availability()
     assert not ok and "/nonexistent/w.pth" in why
 
