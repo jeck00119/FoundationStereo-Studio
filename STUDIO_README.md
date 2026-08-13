@@ -6,6 +6,55 @@ machine and on the Jetson Orin Nano (Linux port validated on-device
 2026-07-22). Upstream's own readme is `readme.md`; this file covers only the
 local additions.
 
+## Deploy on a new machine
+
+**A clone is not enough on its own.** Four things git cannot bring: the model
+repos (they are SIBLING directories, not submodules), their weights, the venv,
+and your captures (`data/` is ignored apart from `data/calib/*.json`).
+
+`tools/check_setup.py` checks every one of those and prints the fix for each —
+run it first, fix what it lists, run it again until it says `Ready`.
+
+**1. Both repos, side by side**
+
+```
+git clone https://github.com/jeck00119/FoundationStereo-Studio.git FoundationStereo
+git clone https://github.com/NVlabs/Fast-FoundationStereo.git
+```
+
+They must be siblings — `studio/backends/registry.py` resolves `../Fast-FoundationStereo`.
+
+**2. Weights** → `Fast-FoundationStereo/weights/hf-c-release/`
+
+`huggingface.co/nvidia/c-fast-foundationstereo` → `cfg.yaml` +
+`model_best_bp2_serialize.pth`. (The readme's Drive folder is routinely
+quota-blocked; the HF drop is the v1.0 unpruned flagship anyway.)
+
+**3. Environment**
+
+| | |
+|---|---|
+| **Jetson** (JetPack 6) | `./setup_jetson.sh` — system libs, venv, Jetson torch wheels, requirements, offscreen test run. Idempotent; self-repairs the known JetPack 6 traps (cudss, ptxas, QtWebEngine's webp/minizip sonames). |
+| **Windows** (Python 3.12) | `py -3.12 -m venv .venv`<br>`.venv\Scripts\pip install torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cu128`<br>`.venv\Scripts\pip install -r requirements.txt` |
+
+torch must come from the platform index BEFORE `requirements.txt` — plain pip
+fetches CPU wheels on Windows and x86 wheels on Jetson.
+
+**4. Check, then run**
+
+```
+python tools/check_setup.py      # exit 1 = nothing can run yet
+./run_studio.sh                  # or run_studio.bat
+```
+
+**Which model on which machine.** TensorRT is a Jetson-only speed option
+(1.13 s vs 1.86 s at the same config) and now reads as unavailable elsewhere.
+Everything else — the ROI crop, the pre-shift, the marked sites, the
+measurement — is backend-agnostic, so **Fast-FoundationStereo (PyTorch) gives
+the same answer on any machine with no engine build at all**. A bigger GPU
+lifts the Jetson's 563k-pixel engine ceiling; re-derive it there rather than
+assuming these numbers.
+
 ## Run
 
 ```
@@ -15,10 +64,11 @@ run_studio.bat            (Windows, console-less; logs land in %TEMP%\fs_studio_
 or, with a console: `.venv\Scripts\python.exe -m studio.app`
 
 The engine (CUDA + the model) runs in a separate child process, so the GUI
-never freezes; each model switch gets a fresh child with clean VRAM. With
-Windows Triton installed (it is, in this venv), Fast-FoundationStereo runs its
-compiled cost-volume path — the first run after changing Input scale or Max
-disparity pauses once while kernels compile.
+never freezes; each model switch gets a fresh child with clean VRAM. Triton is pinned in
+`requirements.txt`, which is what lets Fast-FoundationStereo run its COMPILED
+cost-volume path — without it the eager fallback is correct but takes 4.2x the
+peak memory. The first run after changing Input scale or Max disparity pauses
+once while kernels compile.
 
 ## Map of the repository
 
@@ -123,23 +173,12 @@ cd FoundationStereo
 
 ## Linux / Jetson Orin Nano
 
-Validated on-device 2026-07-22 (JetPack 6 / L4T R36.4.7): test suite 69/69,
-3D-view checks 44/44, full pipeline 22/22. The app code is platform-neutral;
+Validated on-device (JetPack 6 / L4T R36.4.7): test suite 143/143, 3D-view
+checks 44/44, full pipeline 22/22. The app code is platform-neutral;
 the launcher and environment differ:
 
-A fresh clone is NOT enough on its own. `python tools/check_setup.py` reports
-what is missing and how to fix it; the four things git cannot bring are the
-sibling model repos, their weights, the venv, and your captures (`data/` is
-git-ignored apart from `data/calib/*.json`).
-
-```
-git clone <this repo> && cd FoundationStereo
-./setup_jetson.sh          # one-shot: system libs, venv, Jetson torch wheels,
-                           # requirements, offscreen test-suite validation —
-                           # self-repairs the known JetPack 6 traps (cudss,
-                           # ptxas, QtWebEngine's webp/minizip sonames)
-./run_studio.sh            # the run_studio.bat equivalent
-```
+See **Deploy on a new machine** above for the full sequence; on a Jetson it is
+`./setup_jetson.sh` then `./run_studio.sh`.
 
 Notes for the Orin Nano 8 GB (unified CPU+GPU memory):
 - **Fast-FoundationStereo is the practical model** — FoundationStereo ViT-L
