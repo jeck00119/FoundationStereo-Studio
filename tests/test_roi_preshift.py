@@ -358,3 +358,41 @@ def test_the_roi_pipeline_names_no_backend():
         src = open(f"studio/{mod}.py").read()
         hits = re.findall(r"tensorrt|fast_fs|foundation_stereo|backend_key", src)
         assert not hits, f"studio/{mod}.py mentions {set(hits)}"
+
+
+# ----------------------------------------------------- setup checkability
+def test_unavailable_backends_say_what_to_do():
+    """The model repos are SIBLINGS, not submodules, so a fresh clone has none
+    of them. 'repo not found' in a dropdown is not an instruction."""
+    from studio.backends.base import BackendSpec, CheckpointSpec
+
+    gone = BackendSpec(key="x", display_name="X", adapter_module="m",
+                       repo_dir="/nonexistent/Some-Repo", checkpoints=[])
+    ok, why = gone.availability()
+    assert not ok and "clone it next to this repo" in why and "/nonexistent" in why
+
+    noweights = BackendSpec(key="y", display_name="Y", adapter_module="m",
+                            checkpoints=[CheckpointSpec("c", "/nonexistent/w.pth")])
+    ok, why = noweights.availability()
+    assert not ok and "/nonexistent/w.pth" in why
+
+
+def test_requirements_pin_triton_for_windows():
+    """Without it Fast-FS runs its cost volume EAGER: 4.2x the peak memory and
+    slower. It was installed by hand before, so a fresh clone was silently worse
+    than the machine it replaced."""
+    req = open("requirements.txt").read()
+    assert "triton-windows" in req
+    assert 'sys_platform == "win32"' in req
+
+
+def test_setup_check_runs_and_reports():
+    """It must survive being run on a machine where things ARE missing — that is
+    the only machine it matters on."""
+    import subprocess
+    import sys as _s
+    r = subprocess.run([_s.executable, "tools/check_setup.py"],
+                       capture_output=True, text=True, timeout=300)
+    assert r.returncode in (0, 1), r.stderr[-500:]
+    for expected in ("Python", "torch", "triton", "PySide6", "backend"):
+        assert expected in r.stdout, expected

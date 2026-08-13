@@ -91,11 +91,16 @@ class BackendSpec:
             return False, ("not available on this platform "
                            f"(needs {'/'.join(self.platforms)})")
         if self.repo_dir and not os.path.isdir(self.repo_dir):
-            return False, f"repo not found: {self.repo_dir}"
+            # The model repos are SIBLINGS of this one, not submodules, so a
+            # fresh clone has none of them. Say where it should be, not just
+            # that it is absent.
+            return False, (f"clone it next to this repo: {self.repo_dir} "
+                           "(see tools/check_setup.py)")
         if self.python_exe and not os.path.isfile(self.python_exe):
             return False, f"interpreter not found: {self.python_exe}"
         if not any(c.available() for c in self.checkpoints):
-            return False, "no weights found — download a checkpoint"
+            want = self.checkpoints[0].path if self.checkpoints else "?"
+            return False, f"no weights — expected {want} (see tools/check_setup.py)"
         return True, "ready"
 
 

@@ -29,7 +29,7 @@ the local Studio app built on top of it.
 | Entry | Whose | What it is |
 |---|---|---|
 | `studio/` | **local** | the app. `main_window.py` (workflows) · `window/` (parts lifted out of it: roi · level · export · analyze) · `panels/` (input · params · shared widgets) · `viewers.py`, `web_cloud.py`, `web/` (2D views + three.js 3D view) · `worker.py`/`engine_process.py` (GUI↔engine child) · `backends/` (FoundationStereo · Fast-FS · Fast-FS TensorRT · S²M²) · `infer.py`/`cloud.py`/`rectify.py` (shared pipeline; `rectify` also owns the ROI crop + pre-shift) · `pairs.py` (Qt-free loading/pairing) · `measure.py`/`analyze.py`/`sites_measure.py`/`repeat.py`/`compare.py`/`batch.py` (metrology) |
-| `tools/` | **local** | CLIs + diagnostics: `show_sites.py` (what the GUI saved) · `study_pin_heights.py` (headless run of the app's own measurement over a capture run) · `build_roi_engine.py` · `rehearse_study.py` · `calibrate.py` (checkerboard or ChArUco → calib.json; `--simple-lens` for near-distortion-free lenses) · `pair_captures.py` (verifies/names CNC A-B sessions) · `verify_3d_tab.py` (~30 s live 3D-view check) · `verify_full_process.py` (full-chain live check on the GPU) · `bench_orin.py` / `bench_app_orin.py` (Jetson perf/memory harnesses behind the measured defaults) |
+| `tools/` | **local** | CLIs + diagnostics: `check_setup.py` (**run this first on a new machine** — the model repos are siblings, not submodules) · `show_sites.py` (what the GUI saved) · `study_pin_heights.py` (headless run of the app's own measurement over a capture run) · `build_roi_engine.py` · `rehearse_study.py` · `calibrate.py` (checkerboard or ChArUco → calib.json; `--simple-lens` for near-distortion-free lenses) · `pair_captures.py` (verifies/names CNC A-B sessions) · `verify_3d_tab.py` (~30 s live 3D-view check) · `verify_full_process.py` (full-chain live check on the GPU) · `bench_orin.py` / `bench_app_orin.py` (Jetson perf/memory harnesses behind the measured defaults) |
 | `tests/` | **local** | pytest suite (pipeline/calibration/measurement ground truth + GUI behavior): `.venv\Scripts\python.exe -m pytest tests` |
 | `data/` | **local, git-ignored** | your data: `calib/` (calibration files only) · `captures/` (capture sessions) · `exports/` (generated clouds/renders) |
 | `run_studio.bat`, `requirements.txt`, `STUDIO_README.md` | **local** | Windows launcher · its pinned env (torch/cu128 note in its header) · this file |
@@ -126,6 +126,11 @@ cd FoundationStereo
 Validated on-device 2026-07-22 (JetPack 6 / L4T R36.4.7): test suite 69/69,
 3D-view checks 44/44, full pipeline 22/22. The app code is platform-neutral;
 the launcher and environment differ:
+
+A fresh clone is NOT enough on its own. `python tools/check_setup.py` reports
+what is missing and how to fix it; the four things git cannot bring are the
+sibling model repos, their weights, the venv, and your captures (`data/` is
+git-ignored apart from `data/calib/*.json`).
 
 ```
 git clone <this repo> && cd FoundationStereo

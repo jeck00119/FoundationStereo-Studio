@@ -9,6 +9,19 @@
 # flash-attn needs a prebuilt Windows wheel matching torch 2.7/cu128 (it is
 # optional: without it FoundationStereo falls back to standard attention).
 
+# Triton — NOT optional, it is the memory budget.
+# Fast-FoundationStereo's cost-volume builder is @torch.compile'd; TorchInductor
+# fuses the expand->multiply->group-reduce so the giant (C,D,H/4,W/4) intermediate
+# is never materialised, and that fusion needs Triton for GPU codegen. Without it
+# the adapter falls back to eager, which is CORRECT but measured on a 3060 at
+# 4.2x the peak memory AND slower (6.29 GB / 0.55 s vs 1.49 GB / 0.35 s at
+# 932x806, max_disp 192). It was previously installed by hand, so a fresh clone
+# was silently worse than the machine it replaced.
+# The Windows package is `triton-windows`; its major.minor tracks torch's, so
+# this range pairs with the torch 2.7.0 pinned in the header above. (Pinned from
+# that coupling, not from a Windows machine — verify on first install.)
+triton-windows>=3.3,<3.4 ; sys_platform == "win32"
+
 # GUI
 PySide6==6.11.1            # incl. Essentials + Addons (QtWebEngine for the 3D view)
 pyqtgraph==0.14.0
