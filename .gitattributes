@@ -2,3 +2,6 @@ dinov2/ linguist-generated=true
 *.ipynb linguist-language=Python
 # shell scripts must stay LF even on Windows checkouts
 *.sh text eol=lf
+# .bat must be CRLF — cmd.exe can misparse a multi-line if() block otherwise,
+# and this repo's launcher has one. Checked out CRLF on every platform.
+*.bat text eol=crlf

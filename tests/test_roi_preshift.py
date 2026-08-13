@@ -490,3 +490,15 @@ def test_both_launchers_refuse_without_a_venv():
         assert ".venv" in text, name
         assert "install.py" in text or "setup_jetson.sh" in text, name
     assert "exit /b 1" in bat and "exit 1" in sh
+
+
+def test_launchers_have_the_line_endings_their_shells_need():
+    """cmd.exe can misparse a multi-line if() block in an LF-only .bat, and this
+    repo's Windows launcher has one. bash is the mirror case: CR would end up in
+    the command. Neither is testable from the other platform, so pin it here."""
+    bat = open("run_studio.bat", "rb").read()
+    sh = open("run_studio.sh", "rb").read()
+    assert b"\r\n" in bat, "run_studio.bat must be CRLF"
+    assert b"\r" not in sh, "run_studio.sh must be LF only"
+    attrs = open(".gitattributes").read()
+    assert "*.bat text eol=crlf" in attrs and "*.sh text eol=lf" in attrs
