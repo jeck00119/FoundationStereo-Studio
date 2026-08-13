@@ -81,7 +81,8 @@ def main() -> int:
     from studio.dtypes import StereoParams
     from studio.infer import run_inference
     from studio.rectify import Rectifier, StereoCalibration, roi_rects
-    from studio.sites_measure import make_templates, measure_sites, pair_sites
+    from studio.sites_measure import (make_templates, measure_sites,
+                                      pair_sites, untemplatable)
 
     cfg = _settings()
     if args.sites:
@@ -129,6 +130,15 @@ def main() -> int:
     backend.load(CKPT, None)
     ref_res = run_inference(backend, crop(ref_path, "L", lx, ly),
                             crop(ref_path.replace("/left/", "/right/"), "R", rx, ry), p)
+    bad = untemplatable(ref_res.rgb, cfg["sites"], p.roi, p.scale)
+    if bad:
+        print("\n  These sites cannot be tracked in this run's crop:", file=sys.stderr)
+        for name, why in bad:
+            print(f"    {name}: {why}", file=sys.stderr)
+        print("  Fix the ROI or the Input scale in the app, then re-run.\n",
+              file=sys.stderr)
+        if len(bad) == len(cfg["sites"]):
+            return 2          # nothing measurable — say so instead of "0 readings"
     templates = make_templates(ref_res.rgb, cfg["sites"], p.roi, p.scale)
 
     rows, t0 = [], time.time()

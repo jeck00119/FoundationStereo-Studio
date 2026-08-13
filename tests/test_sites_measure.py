@@ -143,3 +143,25 @@ def test_geom_key_is_not_mistaken_for_a_site():
     t = make_templates(rgb, [PIN, REF], ROI, 1.0)
     assert "__geom__" in t and t["__geom__"] == (ROI, 1.0)
     assert set(t) - {"__geom__"} == {"Pin 1", "Ref 1"}
+
+
+def test_untemplatable_says_why_instead_of_reporting_zero_readings():
+    """A site with no template silently produces no reading, and "0 readings" is
+    the least useful thing a study can report. The usual cause is scale: a
+    512x1024 ROI at scale 0.25 is 128x256 working px and a 120x120 template
+    cannot fit inside it at all."""
+    from studio.sites_measure import untemplatable
+
+    rgb, _, _, _ = _scene()                     # 1024x512, scale 1.0
+    assert untemplatable(rgb, [PIN, REF], ROI, 1.0) == []
+
+    small = np.zeros((256, 128, 3), np.uint8)   # the same ROI at scale 0.25
+    bad = untemplatable(small, [PIN, REF], ROI, 0.25)
+    assert len(bad) == 2
+    for name, why in bad:
+        assert "cannot fit" in why or "outside" in why
+        assert "128×256" in why or "128" in why
+
+    outside = {"kind": "pin", "x": 3900, "y": 2900, "name": "Outside"}
+    bad = untemplatable(rgb, [outside], ROI, 1.0)
+    assert len(bad) == 1 and "outside" in bad[0][1]

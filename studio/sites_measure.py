@@ -70,6 +70,27 @@ def pair_sites(sites) -> list:
     return out
 
 
+def untemplatable(rgb, sites, roi, scale: float, r: int = TEMPLATE_R) -> list:
+    """[(name, why)] for sites that cannot be tracked in THIS run's crop.
+
+    A site that gets no template silently produces no reading, and "0 readings"
+    is the least useful thing a study can report. The usual cause is scale: a
+    512×1024 ROI at scale 0.25 is 128×256 working pixels, and a 120×120 template
+    does not fit inside it at all.
+    """
+    H, W = rgb.shape[0], rgb.shape[1]
+    out = []
+    for s in sites:
+        u, v = site_pixel(s, roi, scale)
+        if W < 2 * r or H < 2 * r:
+            out.append((s["name"], f"crop is {W}×{H} at scale {scale:g}; a "
+                                   f"{2*r}×{2*r} tracking template cannot fit"))
+        elif not (r <= u < W - r and r <= v < H - r):
+            out.append((s["name"], f"maps to ({u},{v}), outside the {W}×{H} crop "
+                                   f"(needs {r} px of margin)"))
+    return out
+
+
 def make_templates(rgb, sites, roi, scale: float, r: int = TEMPLATE_R) -> dict:
     """Cut a tracking template per site from the reference capture's crop.
 

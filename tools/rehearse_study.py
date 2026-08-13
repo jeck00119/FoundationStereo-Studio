@@ -11,7 +11,6 @@ Pure diagnostics: reads captures, writes nothing but stdout (+ optional --csv).
 """
 import argparse
 import glob
-import json
 import os
 import re
 import sys
