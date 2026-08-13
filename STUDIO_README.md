@@ -28,8 +28,8 @@ the local Studio app built on top of it.
 
 | Entry | Whose | What it is |
 |---|---|---|
-| `studio/` | **local** | the app. Flat, descriptively-named modules: `main_window.py` (workflows) · `panels.py` (input/param panels) · `viewers.py`, `web_cloud.py`, `web/` (2D views + three.js 3D view) · `worker.py`/`engine_process.py` (GUI↔engine child) · `backends/` (FoundationStereo · Fast-FS · S²M²) · `infer.py`/`cloud.py` (shared pipeline) · `pairs.py` (Qt-free loading/pairing) · `measure.py`/`analyze.py`/`repeat.py`/`compare.py`/`batch.py` (metrology tools) |
-| `tools/` | **local** | CLIs + diagnostics: `calibrate.py` (checkerboard or ChArUco → calib.json; `--simple-lens` for near-distortion-free lenses) · `pair_captures.py` (verifies/names CNC A-B sessions) · `verify_3d_tab.py` (~30 s live 3D-view check) · `verify_full_process.py` (full-chain live check on the GPU) · `bench_orin.py` / `bench_app_orin.py` (Jetson perf/memory harnesses behind the measured defaults) |
+| `studio/` | **local** | the app. `main_window.py` (workflows) · `window/` (parts lifted out of it: roi · level · export · analyze) · `panels/` (input · params · shared widgets) · `viewers.py`, `web_cloud.py`, `web/` (2D views + three.js 3D view) · `worker.py`/`engine_process.py` (GUI↔engine child) · `backends/` (FoundationStereo · Fast-FS · Fast-FS TensorRT · S²M²) · `infer.py`/`cloud.py`/`rectify.py` (shared pipeline; `rectify` also owns the ROI crop + pre-shift) · `pairs.py` (Qt-free loading/pairing) · `measure.py`/`analyze.py`/`sites_measure.py`/`repeat.py`/`compare.py`/`batch.py` (metrology) |
+| `tools/` | **local** | CLIs + diagnostics: `show_sites.py` (what the GUI saved) · `study_pin_heights.py` (headless run of the app's own measurement over a capture run) · `build_roi_engine.py` · `rehearse_study.py` · `calibrate.py` (checkerboard or ChArUco → calib.json; `--simple-lens` for near-distortion-free lenses) · `pair_captures.py` (verifies/names CNC A-B sessions) · `verify_3d_tab.py` (~30 s live 3D-view check) · `verify_full_process.py` (full-chain live check on the GPU) · `bench_orin.py` / `bench_app_orin.py` (Jetson perf/memory harnesses behind the measured defaults) |
 | `tests/` | **local** | pytest suite (pipeline/calibration/measurement ground truth + GUI behavior): `.venv\Scripts\python.exe -m pytest tests` |
 | `data/` | **local, git-ignored** | your data: `calib/` (calibration files only) · `captures/` (capture sessions) · `exports/` (generated clouds/renders) |
 | `run_studio.bat`, `requirements.txt`, `STUDIO_README.md` | **local** | Windows launcher · its pinned env (torch/cu128 note in its header) · this file |
@@ -74,6 +74,30 @@ z-far **208 mm** · Denoise on · per-machine inference settings:
 Rule of thumb: this scene needs ≈ scale × 546 px of disparity — keep Max
 disparity above that (the app warns on saturation). The z-clip removes
 out-of-focus tall structures the optics cannot measure (DOF ≈ 1–3 mm).
+
+## Measuring pin heights over a capture run
+
+The metrology workflow, in the order the app expects:
+
+1. Load a pair; set **Raw — rectify with calibration** and load your `calib.json`.
+2. Pick a model. **TensorRT is a Jetson speed option only** — everything else is
+   backend-agnostic, so PyTorch gives the same answer anywhere with no engine.
+3. Tick **ROI** on the Input tab and drag it over the parts you measure. Δ (the
+   right-crop pre-shift) is re-measured automatically whenever the box moves;
+   the label shows it plus `engine ✓` or a warning that this SIZE would need a
+   build. Position is always free — only a resize can cost one.
+4. **Run** once. This is the reference capture site tracking cuts templates from.
+5. `Mark: pin` → click each pin. `Mark: reference` → click a **textured** surface
+   near each (bare solder mask reconstructs poorly and makes a noisy reference).
+   `tools/show_sites.py` prints what was saved and the pin→reference pairing.
+6. **Batch…** → the capture folder. One row per capture in Repeatability; export CSV.
+
+Why sites rather than the 3D measure boxes: a box is fixed in the camera frame
+and this rig's frame does not hold still. Boxes seeded from one capture came
+back **empty on 19 of 20** later ones. Sites are tracked per capture and
+differenced inside the frame, which also cancels the ~0.5 % variation in the CNC
+step — i.e. in the stereo baseline (σ 2200 µm absolute vs ~350–500 µm
+referenced). Measure boxes remain for saved-cloud batches, which have no image.
 
 ## Working across machines (git)
 

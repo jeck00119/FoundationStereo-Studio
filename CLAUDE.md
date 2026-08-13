@@ -83,21 +83,44 @@ iters 8, warm):
 Full app press-to-cloud ≈ 3 s. Scale rule: needed disparity ≈ scale × 546 px
 ≤ max_disp. Orin ≈ 7.7× slower than the PC's 3060 at identical config.
 
-**Ceilings (measured, do not re-litigate)**: TRT engines cannot exceed
-scale 0.30 on 8 GB — at ≥0.35 every tactic for one fused cost-volume op
-wants 4.1–4.7 GB against the ~2.6 GB actually free, and trtexec gives up on
-that node (this is also NVlabs issue #43's unexplained report). The node and
-error code vary with size, so recognise the pattern, not the string: 832×960
-· d224 died at `PWN(/Mul_1)`, 4.29 GB, Error 10 (insufficient device memory);
-928×1088 · d256 at a longer fused `PWN(...)` chain, 4.65 GB, Error 4
-(insufficient workspace). Both logs are kept beside the engines.
-PyTorch reaches 0.40 engine-only but is OOM-adjacent with the GUI up;
-0.50·416 is kernel-OOM-killed. **Next project if >0.30 is ever needed here:
-upstream's TRT plugin path (PR #55, fused GWC kernel).** Until then 0.35+
-belongs to the Windows machine.
+**The engine ceiling is PIXELS, not cost volume (measured 2026-08-11)**.
+An earlier version of this file said "scale 0.30" and blamed the cost
+volume (H·W·D). That is wrong and a build disproved it: 1024×1024 · d64 is
+only **67M** H·W·D — well under the 108M that builds — and still failed, at
+`/AveragePool_1`. Pooling and convolutions scale with **pixels alone**;
+`max_disp` never enters them. Every attempt over **563k px** has failed:
+
+| padded | H·W·D | result |
+|---|---|---|
+| 512×1024 · d64 (524k px) | 34M | ✅ built, 76 min |
+| 704×800 · d192 (563k px) | 108M | ✅ built |
+| 832×960 · d224 (799k px) | 179M | ❌ `PWN(/Mul_1)`, 4.29 GB, Error 10 |
+| 928×1088 · d256 (1010k px) | 258M | ❌ fused `PWN(…)`, 4.65 GB, Error 4 |
+| 1024×1024 · d64 (1049k px) | 67M | ❌ `/AveragePool_1` |
+
+So **keep any crop ≤563k px and max_disp is nearly free**. Failure logs are
+kept beside the engines. PyTorch reaches 0.40 engine-only but is OOM-adjacent
+with the GUI up; 0.50·416 is kernel-OOM-killed.
+
+**Full resolution fits anyway — use an ROI + pre-shift.** A macro pair's
+disparity is huge in absolute terms (~500 px here) but varies only a few px
+across a flat board, so ~95 % of any cost volume searches disparities that
+never occur. Crop to what you measure, start the RIGHT crop Δ px further
+left, and `max_disp` collapses to its 64 floor: **512×1024 at scale 1.00,
+0.64 s/run, 42 µm per 0.1 px** — better resolution than full-frame 0.20 for
+less memory. Δ is measured from the images (no calibration, no prior run)
+and placed **0.6·max_disp** below the match so the observed band lands mid-
+range; a fixed 24 px margin put it at the edge and cost 5× in σ (2284 vs
+435 µm). Details in `StereoParams.roi` and `studio/window/roi.py`.
 
 **TRT engine cache**: per (padded size · iters · max_disp) under
-`weights/<run>/trt/`, survives reboots. A new size builds once — ~1¾ h at
+`weights/<run>/trt/`, survives reboots. Building is **opt-in** — the
+"Build engine if missing" toggle, default OFF; otherwise the backend refuses
+a new size and lists the engines it does have. TensorRT is ONLY a speed
+optimisation (1.13 s vs 1.86 s at the ROI config, measured); the crop,
+pre-shift, sites and measurement are backend-agnostic, so the PyTorch
+backend gives the same answer with no engine at all. The ROI label says
+`engine ✓` or warns before you pay. A new size builds once — ~1¾ h at
 default opt level (`FS_TRT_OPT_LEVEL=2` for far faster probe builds),
 narrated by minute heartbeats with a kept `.build.log`. ONNX export runs
 CPU-side in a throwaway subprocess **on purpose**: GPU-side tracing pins
@@ -111,6 +134,29 @@ timing work. TorchInductor's parallel compile pool dies here, so the torch
 adapter pins serial compile + a persistent cache dir (first-ever compile on
 a fresh device is >10 min with no output — let it finish once via
 `tools/bench_orin.py warmup`).
+
+## Measuring pin heights on this rig (measured over 1000 real captures)
+
+Mark **sites** on the Input tab (`Mark: pin` / `Mark: reference`), not
+world-space measure boxes — boxes seeded from one capture were **empty on 19
+of 20** later ones. Each site is tracked per capture and a height is only ever
+**pin − reference within one frame**. What the run taught, all of it measured:
+
+- **The CNC repeats its step to 28 µm (0.53 %)** — not the limiter. But that
+  step IS the stereo baseline, so it walks ABSOLUTE depth by >1 mm: σ 2200 µm
+  absolute vs ~350–500 µm differential. Always reference inside the frame.
+- **The reference must have TEXTURE.** Local contrast: bare solder mask 3.4
+  grey levels, metal bar 3.6 — the network guesses there. Component body 23.8,
+  leads 57–69. This mattered more than any other single choice.
+- **Don't seed geometry from the first capture.** loop001 sat 13 px (5.4 mm)
+  off every later one.
+- Current best: **σ 335–495 µm** on specular connector leads. That is stereo
+  matching noise, not the machine. 42 µm/0.1 px is the SENSOR's resolution,
+  not the rig's repeatability.
+
+Tools: `tools/show_sites.py` (what the GUI saved) · `tools/study_pin_heights.py`
+(headless run of the app's own measurement) · `tools/build_roi_engine.py` ·
+`tools/rehearse_study.py`.
 
 **Validate**: `pytest tests` (offscreen: `QT_QPA_PLATFORM=offscreen`) →
 `tools/verify_full_process.py` → `tools/verify_trt_backend.py all [--rig]`
